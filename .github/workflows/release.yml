@@ -8,6 +8,10 @@ on:
         type: choice
         default: all
         options: [all, macos, windows, source]
+      keep_diagnostic_artifact:
+        description: Keep a diagnostic artifact for one day
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,7 +42,9 @@ jobs:
           test "$(awk '$1 == "BetaChannel" { print $2 }' Telegram/build/version)" = 0
           test "$(awk '$1 == "AlphaVersion" { print $2 }' Telegram/build/version)" = 0
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test -z "$(git ls-remote --tags origin "refs/tags/v$VERSION")"
+          if [ "${{ inputs.component }}" = all ]; then
+            test -z "$(git ls-remote --tags origin "refs/tags/v$VERSION")"
+          fi
           test ! -d Telegram/Resources/ayu/languages
 
   source:
@@ -77,7 +83,7 @@ jobs:
           path: artifacts/AyuGramDesktop-7.2.5-full.tar.gz
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 1
 
   macos:
     name: macOS universal Release
@@ -268,7 +274,7 @@ jobs:
           path: ${{ env.REPO_NAME }}/artifacts/AyuGram.dmg
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 1
 
   windows:
     name: Windows x64 Release
@@ -454,7 +460,7 @@ jobs:
             ${{ env.TBUILD }}\${{ env.REPO_NAME }}\artifacts\AyuGram.zip
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 1
 
   publish:
     name: Publish GitHub Release
@@ -500,3 +506,28 @@ jobs:
             --title "AyuGram $VERSION" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             --latest
+
+  cleanup:
+    name: Remove temporary release artifacts
+    needs: [validate, source, macos, windows, publish]
+    if: always() && (inputs.component == 'all' || inputs.keep_diagnostic_artifact != true)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Delete artifacts from this run
+        run: |
+          set -euo pipefail
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[].id' |
+          while IFS= read -r artifact_id; do
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+          done
+          test "$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --jq '.total_count')" -eq 0
