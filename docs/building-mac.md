@@ -9,8 +9,12 @@ Install Xcode and Homebrew first. CI uses Xcode 16.4 on `macos-15`; the `.icns`
 fallback does not require Xcode 26's Icon Composer.
 
 ```bash
-brew install git automake libtool cmake pkg-config ninja nasm meson ccache
+brew install git automake libtool cmake pkg-config wget ninja nasm meson ccache
 ```
+
+Preparation also installs a private Rust toolchain under `../ThirdParty/rust`
+through `rustup` and builds the `tlottie` sticker renderer with it; nothing
+Rust-related needs to be installed system-wide.
 
 Select the installed Xcode using `xcode-select` if necessary. Obtain your own
 `TDESKTOP_API_ID` and `TDESKTOP_API_HASH` as described in

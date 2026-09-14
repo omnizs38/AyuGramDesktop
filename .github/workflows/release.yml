@@ -22,7 +22,7 @@ concurrency:
 
 env:
   REPO_NAME: AyuGramDesktop
-  VERSION: 7.2.5
+  VERSION: 7.2.8
 
 jobs:
   validate:
@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
       - name: Match source version and release ref
         run: |
-          test "$GITHUB_REF" = refs/heads/codex/ayu-7.2.5
+          test "$GITHUB_REF" = refs/heads/codex/ayu-7.2.8
           test "$(awk '$1 == "AppVersionStr" { print $2 }' Telegram/build/version)" = "$VERSION"
           test "$(awk '$1 == "AppVersionOriginal" { print $2 }' Telegram/build/version)" = "$VERSION"
           test "$(awk '$1 == "BetaChannel" { print $2 }' Telegram/build/version)" = 0
@@ -80,7 +80,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: release-source-${{ github.sha }}
-          path: artifacts/AyuGramDesktop-7.2.5-full.tar.gz
+          path: artifacts/AyuGramDesktop-${{ env.VERSION }}-full.tar.gz
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -115,7 +115,7 @@ jobs:
       - name: Install build tools
         id: toolchain
         run: |
-          brew install automake libtool meson nasm ninja pkg-config ccache
+          brew install automake libtool meson nasm ninja pkg-config wget ccache
           sudo xcode-select -s "$DEVELOPER_DIR"
           toolchain_id=$( { xcodebuild -version; xcrun --sdk macosx --show-sdk-version; cmake --version; } | shasum -a 256 | cut -c1-16)
           echo "id=$toolchain_id" >> "$GITHUB_OUTPUT"
@@ -489,7 +489,7 @@ jobs:
       - name: Publish exact-head release
         run: |
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
-          Technical maintenance build of AyuGram 7.2.5 from commit \`$GITHUB_SHA\`.
+          Technical maintenance build of AyuGram $VERSION from commit \`$GITHUB_SHA\`.
 
           - \`AyuGram.dmg\`: universal macOS application (Apple Silicon and Intel)
           - \`AyuGram.exe\`: Windows x64 installer

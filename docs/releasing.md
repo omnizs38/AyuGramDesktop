@@ -69,7 +69,7 @@ not perform one.
 
 ## Contributing upstream
 
-The Telegram 7.2.5 update builds on
+The Telegram 7.2.8 update builds on
 [AyuGramDesktop #460](https://github.com/AyuGram/AyuGramDesktop/pull/460).
 Preserve its authorship and merge ancestry. The earlier macOS workflow proposal
 [#427](https://github.com/AyuGram/AyuGramDesktop/pull/427) is related work.
