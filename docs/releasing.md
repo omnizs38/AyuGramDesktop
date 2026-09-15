@@ -37,6 +37,44 @@ a build gets slower. A compiler cache hit rate near zero explains an otherwise
 inexplicable three-hour job, and swap above a few hundred megabytes means three
 parallel compilers do not fit in the runner's memory.
 
+## Releasing a new Telegram version
+
+The order is merge, push, warm, release. Skipping the warm step is the mistake
+that costs hours: `Release` only reads caches, so a branch nobody has warmed
+compiles from nothing, and every retry after a late packaging failure pays the
+same price again.
+
+1. Branch from the default branch and merge the upstream tag:
+   `git switch -c codex/ayu-<version> origin/dev --no-track`. Resolve the
+   conflicts in the AyuGram-patched sources. If upstream moved the `lib_ui` or
+   `lib_tl` pins, merge and push those repositories first.
+2. Set `VERSION` in `.github/workflows/release.yml`. It is the only place the
+   version is written; the branch name check derives from it.
+3. Push the branch and let `Source checks` go green before anything expensive
+   starts.
+4. Warm it:
+   `gh workflow run "Cache warm" --ref dev -f ref=codex/ayu-<version>`.
+   `--ref dev` is the default branch, where the workflow has to run for its
+   caches to be readable from anywhere; `-f ref=` names the branch to build.
+   Without `-f` the newest release branch is picked, which is the new one
+   anyway.
+5. When the warm run is green, dispatch `Release` on the new branch.
+
+How long step 4 takes depends on what upstream shipped, and the gap is wide
+enough to plan around. The dependency cache key hashes
+`Telegram/build/prepare/**` and `Telegram/build/qt_version.py`. Neither changed
+across the six version bumps from 7.1.4 to 7.2.5, so all of them reused a
+dependency tree that costs two hours per platform to build, and the last four
+touched exactly one source file, the one carrying the version number. 7.2.6
+changed both files, because it replaced `rlottie` with `tlottie` and
+preparation started building a Rust library; the 7.2.5 to 7.2.7 range also
+rewrote 154 of the 2883 sources. Read those two paths in the upstream diff
+before promising anyone a fast release.
+
+Merging is the slow half now, and none of this speeds it up: the conflicts in
+AyuGram-patched sources and the separate `lib_ui` and `lib_tl` merges are hand
+work.
+
 ## Caches
 
 Cold, a release costs about two hours per platform to prepare the dependencies
@@ -61,18 +99,17 @@ older one. Anything that is not a release branch of this repository is refused,
 because warming hands a branch the application credentials and write access to
 the caches every other branch reads.
 
-`.github/workflows/cache-warm.yml` has to exist on the default branch. GitHub
-starts scheduled runs, and offers `Run workflow`, only from the default branch's
-copy of a workflow file, and the workflow refuses to start anywhere else.
-Everything else a warm run needs, the composite actions and the sources, comes
-from the checkout of the branch being warmed, so only this one file has to be
-merged there. Do that before the first release that expects a warm cache,
-dispatch it once, and confirm with `gh cache list` that entries appear with
-`ref refs/heads/<default branch>`. The default branch must then stay put: moving
-it, as happened at 7.2.5, scopes every warmed cache to a branch that is no
-longer the default, and the next warm run deletes them as off-branch. GitHub
-also disables scheduled workflows in a repository with no activity for sixty
-days, which would stop the warming silently.
+`cache-warm.yml` and `cache-prune.yml` have to exist on the default branch,
+which is `dev`. GitHub starts scheduled runs, and offers `Run workflow`, only
+from the default branch's copy of a workflow file, and the warming workflow
+refuses to start anywhere else. Everything else a warm run needs, the composite
+actions and the sources, comes from the checkout of the branch being warmed, so
+`dev` has to carry only the workflow files. Which branch is the default must
+not change again: it moved at 7.2.5, which scoped every warmed cache to a
+branch that was no longer the default and left the next release cold. Moving
+the `dev` tip is not the same thing and is fine, because caches are scoped to
+the ref name. GitHub also disables scheduled workflows in a repository with no
+activity for sixty days, which would stop the warming silently.
 
 Ownership is split so the budget stays predictable: `Cache warm` writes every
 cache, compiler and dependency alike, and `Release` only reads them. Both

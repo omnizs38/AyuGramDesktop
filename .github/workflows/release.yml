@@ -38,7 +38,7 @@ jobs:
           persist-credentials: false
       - name: Match source version and release ref
         run: |
-          test "$GITHUB_REF" = refs/heads/codex/ayu-7.2.8
+          test "$GITHUB_REF" = "refs/heads/codex/ayu-$VERSION"
           test "$(awk '$1 == "AppVersionStr" { print $2 }' Telegram/build/version)" = "$VERSION"
           test "$(awk '$1 == "AppVersionOriginal" { print $2 }' Telegram/build/version)" = "$VERSION"
           test "$(awk '$1 == "BetaChannel" { print $2 }' Telegram/build/version)" = 0
