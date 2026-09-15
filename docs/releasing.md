@@ -8,8 +8,16 @@ official upstream release.
 ## Build checks
 
 `Source checks` runs on pushes and pull requests without production credentials.
-It checks build options and workflow syntax, but does not compile the C++
-application.
+It runs the unit tests in `Telegram/build`, checks preparation syntax and lints
+both the workflows and the composite actions, but does not compile the C++
+application. `actionlint` globs `.github/workflows` only and resolves
+`uses: ./...` from the repository root, so the check first stages a tree
+holding every checkout layout the workflows name, and fails when one of those
+paths has no action behind it. An unresolvable local `uses:` is not an
+`actionlint` error but silence, and a mistyped `with:` key is then not an error
+either but an empty string three hours into a build. `.github/lint_actions.py`
+covers what `actionlint` still does not read: the shell inside the composite
+actions and the step keys the runner requires and accepts there.
 
 `Release` runs only by an explicit manual dispatch. It validates the version
 before starting the expensive jobs, then builds universal macOS and Windows x64
