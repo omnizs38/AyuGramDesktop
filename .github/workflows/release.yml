@@ -258,10 +258,11 @@ jobs:
           }
       - name: Prepare directories
         run: |
-          $build = Join-Path $env:USERPROFILE 'TBuild'
+          # Build on the workspace drive. The runner image leaves about 25 GB
+          # free on C:, which a Release build does not fit into.
+          $build = Join-Path $env:GITHUB_WORKSPACE 'TBuild'
           New-Item -ItemType Directory -Force (Join-Path $build 'Libraries\win64') | Out-Null
-          New-Item -ItemType Junction -Path (Join-Path $env:GITHUB_WORKSPACE 'TBuild') -Target $build | Out-Null
-          "TBUILD=$(Join-Path $env:GITHUB_WORKSPACE 'TBuild')" | Out-File $env:GITHUB_ENV -Append
+          "TBUILD=$build" | Out-File $env:GITHUB_ENV -Append
       - uses: actions/checkout@v7
         with:
           submodules: recursive
