@@ -85,13 +85,23 @@ jobs:
           compression-level: 0
           retention-days: 1
 
-  macos:
-    name: macOS universal Release
+  macos-build:
+    name: macOS ${{ matrix.architecture }} Release
     needs: validate
     if: inputs.component == 'all' || inputs.component == 'macos'
     runs-on: macos-15
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            swift_target: arm64-apple-macos11.0
+          - architecture: x86_64
+            swift_target: x86_64-apple-macos10.13
     env:
+      ARCHITECTURE: ${{ matrix.architecture }}
+      SWIFT_TARGET: ${{ matrix.swift_target }}
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       CCACHE_DIR: ${{ github.workspace }}/ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
@@ -145,53 +155,67 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-macos-universal-release-${{ steps.toolchain.outputs.id }}-${{ github.sha }}
-          restore-keys: ccache-macos-universal-release-${{ steps.toolchain.outputs.id }}-
-      - name: Build both Release architectures
+          key: ccache-macos-${{ matrix.architecture }}-release-${{ steps.toolchain.outputs.id }}-${{ github.sha }}
+          restore-keys: ccache-macos-${{ matrix.architecture }}-release-${{ steps.toolchain.outputs.id }}-
+      - name: Build ${{ matrix.architecture }} Release
         working-directory: ${{ env.REPO_NAME }}/Telegram
         run: |
-          mkdir -p ../mac-apps
           export CMAKE_BUILD_TYPE=Release
-          for architecture in arm64 x86_64; do
-            if [[ "$architecture" == arm64 ]]; then
-              swift_target=arm64-apple-macos11.0
-            else
-              swift_target=x86_64-apple-macos10.13
-            fi
-            rm -rf ../out
-            ./configure.sh -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-              "-DCMAKE_OSX_ARCHITECTURES=$architecture" \
-              "-DCMAKE_Swift_FLAGS=-target $swift_target" \
-              "-DDESKTOP_APP_MAC_ARCH=$architecture" \
-              -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-              -DCMAKE_OBJC_COMPILER_LAUNCHER=ccache \
-              -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache \
-              '-DCMAKE_CXX_FLAGS=-Xclang -fno-pch-timestamp' \
-              '-DCMAKE_OBJCXX_FLAGS=-Xclang -fno-pch-timestamp' \
-              "-DTDESKTOP_API_ID=$TDESKTOP_API_ID" \
-              "-DTDESKTOP_API_HASH=$TDESKTOP_API_HASH" \
-              -DDESKTOP_APP_DISABLE_AUTOUPDATE=ON \
-              -DDESKTOP_APP_DISABLE_CRASH_REPORTS=ON
-            python3 build/check_macos_release.py ../out \
-              --architectures "$architecture"
-            cmake --build ../out --parallel 3 --target Telegram
-            mkdir -p "../mac-apps/$architecture"
-            ditto ../out/AyuGram.app "../mac-apps/$architecture/AyuGram.app"
-          done
+          rm -rf ../out
+          ./configure.sh -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            "-DCMAKE_OSX_ARCHITECTURES=$ARCHITECTURE" \
+            "-DCMAKE_Swift_FLAGS=-target $SWIFT_TARGET" \
+            "-DDESKTOP_APP_MAC_ARCH=$ARCHITECTURE" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_OBJC_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache \
+            '-DCMAKE_CXX_FLAGS=-Xclang -fno-pch-timestamp' \
+            '-DCMAKE_OBJCXX_FLAGS=-Xclang -fno-pch-timestamp' \
+            "-DTDESKTOP_API_ID=$TDESKTOP_API_ID" \
+            "-DTDESKTOP_API_HASH=$TDESKTOP_API_HASH" \
+            -DDESKTOP_APP_DISABLE_AUTOUPDATE=ON \
+            -DDESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+          python3 build/check_macos_release.py ../out \
+            --architectures "$ARCHITECTURE"
+          cmake --build ../out --parallel 3 --target Telegram
           ccache --show-stats
+          mkdir -p "../mac-apps/$ARCHITECTURE"
+          ditto ../out/AyuGram.app "../mac-apps/$ARCHITECTURE/AyuGram.app"
+          tar -C ../mac-apps -cf "../mac-apps/$ARCHITECTURE.tar" "$ARCHITECTURE"
       - name: Save compiler cache
         if: always() && steps.compiler-cache.outputs.cache-primary-key != '' && steps.compiler-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-app-${{ matrix.architecture }}-${{ github.sha }}
+          path: ${{ env.REPO_NAME }}/mac-apps/${{ matrix.architecture }}.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  macos:
+    name: macOS universal Release
+    needs: macos-build
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: macos-app-*-${{ github.sha }}
+          path: ${{ env.REPO_NAME }}/mac-apps
+          merge-multiple: true
       - name: Verify app and create DMG
         working-directory: ${{ env.REPO_NAME }}
         run: |
           trap 'echo "macOS packaging failed at line $LINENO." >&2' ERR
+          tar -C mac-apps -xf mac-apps/arm64.tar
+          tar -C mac-apps -xf mac-apps/x86_64.tar
           app=release/AyuGram.app
           arm=mac-apps/arm64/AyuGram.app
           intel=mac-apps/x86_64/AyuGram.app

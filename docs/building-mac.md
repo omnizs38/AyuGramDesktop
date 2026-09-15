@@ -23,10 +23,10 @@ and export them in the build shell. Do not commit credentials.
 
 ## Release preview
 
-The release workflow builds `arm64` and `x86_64` separately, then combines every
-architecture-dependent Mach-O file with `lipo`. This preserves Swift-based local
-translation, which CMake cannot configure with multiple values in
-`CMAKE_OSX_ARCHITECTURES`.
+The release workflow builds `arm64` and `x86_64` on separate runners, then
+combines every architecture-dependent Mach-O file with `lipo`. This preserves
+Swift-based local translation, which CMake cannot configure with multiple values
+in `CMAKE_OSX_ARCHITECTURES`.
 
 For a local single-architecture Release build:
 

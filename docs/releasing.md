@@ -13,9 +13,10 @@ application.
 
 `Release` runs only by an explicit manual dispatch. It validates the version
 before starting the expensive jobs, then builds universal macOS and Windows x64
-packages plus the full recursive source archive. Dependencies and compiler
-results use separate caches. The workflow creates the tag and public GitHub
-Release only after every build and package check succeeds.
+packages plus the full recursive source archive. Each macOS architecture builds
+in its own job because one cold build of both exceeds the six-hour job limit.
+Dependencies and compiler results use separate caches. The workflow creates the
+tag and public GitHub Release only after every build and package check succeeds.
 
 The default `all` component is the only mode that publishes a release. Select a
 single component only to diagnose its release build without repeating the other
