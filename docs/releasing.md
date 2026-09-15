@@ -22,6 +22,13 @@ The default `all` component is the only mode that publishes a release. Select a
 single component only to diagnose its release build without repeating the other
 expensive jobs.
 
+Both platform jobs report into the run summary: time per CMake target and the
+slowest translation units from `.ninja_log`, compiler cache statistics, and on
+macOS the swap used during compilation. Read that report, not a stopwatch, when
+a build gets slower. A compiler cache hit rate near zero explains an otherwise
+inexplicable three-hour job, and swap above a few hundred megabytes means three
+parallel compilers do not fit in the runner's memory.
+
 Set the repository variable `TDESKTOP_API_ID` and secret `TDESKTOP_API_HASH` to
 credentials obtained for the application through
 [Telegram](https://core.telegram.org/api/obtaining_api_id). Missing credentials

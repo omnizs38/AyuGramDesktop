@@ -21,6 +21,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Duplicated as a literal in every `uses: ./...` path below, because `uses:`
+  # forbids expressions. Change the four literals together with this value.
   REPO_NAME: AyuGramDesktop
   VERSION: 7.2.8
 
@@ -100,14 +102,6 @@ jobs:
           - architecture: x86_64
             swift_target: x86_64-apple-macos10.13
     env:
-      ARCHITECTURE: ${{ matrix.architecture }}
-      SWIFT_TARGET: ${{ matrix.swift_target }}
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
-      CCACHE_DIR: ${{ github.workspace }}/ccache
-      CCACHE_BASEDIR: ${{ github.workspace }}
-      CCACHE_MAXSIZE: 2G
-      CCACHE_COMPILERCHECK: content
-      CCACHE_SLOPPINESS: pch_defines,time_macros
       TDESKTOP_API_ID: ${{ vars.TDESKTOP_API_ID }}
       TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
     steps:
@@ -122,75 +116,21 @@ jobs:
           submodules: recursive
           path: ${{ env.REPO_NAME }}
           persist-credentials: false
-      - name: Install build tools
-        id: toolchain
-        run: |
-          brew install automake libtool meson nasm ninja pkg-config wget ccache
-          sudo xcode-select -s "$DEVELOPER_DIR"
-          toolchain_id=$( { xcodebuild -version; xcrun --sdk macosx --show-sdk-version; cmake --version; } | shasum -a 256 | cut -c1-16)
-          echo "id=$toolchain_id" >> "$GITHUB_OUTPUT"
-      - name: Restore libraries cache
-        id: libraries-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            Libraries
-            ThirdParty
-          key: macos-universal-release-${{ steps.toolchain.outputs.id }}-${{ hashFiles('AyuGramDesktop/Telegram/build/prepare/**', 'AyuGramDesktop/Telegram/build/qt_version.py') }}
-          restore-keys: macos-universal-release-${{ steps.toolchain.outputs.id }}-
       - name: Prepare libraries
-        run: ./${{ env.REPO_NAME }}/Telegram/build/prepare/mac.sh silent qt-release-only
-      - name: Prune libraries
-        run: find Libraries '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
-      - name: Save libraries cache
-        if: steps.libraries-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: ./AyuGramDesktop/.github/actions/macos-libraries
         with:
-          path: |
-            Libraries
-            ThirdParty
-          key: ${{ steps.libraries-cache.outputs.cache-primary-key }}
-      - name: Restore compiler cache
-        id: compiler-cache
-        uses: actions/cache/restore@v6
+          repo-name: ${{ env.REPO_NAME }}
+          save-cache: 'true'
+      - name: Compile
+        uses: ./AyuGramDesktop/.github/actions/macos-compile
         with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ccache-macos-${{ matrix.architecture }}-release-${{ steps.toolchain.outputs.id }}-${{ github.sha }}
-          restore-keys: ccache-macos-${{ matrix.architecture }}-release-${{ steps.toolchain.outputs.id }}-
-      - name: Build ${{ matrix.architecture }} Release
-        working-directory: ${{ env.REPO_NAME }}/Telegram
-        run: |
-          export CMAKE_BUILD_TYPE=Release
-          rm -rf ../out
-          ./configure.sh -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            "-DCMAKE_OSX_ARCHITECTURES=$ARCHITECTURE" \
-            "-DCMAKE_Swift_FLAGS=-target $SWIFT_TARGET" \
-            "-DDESKTOP_APP_MAC_ARCH=$ARCHITECTURE" \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_OBJC_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache \
-            '-DCMAKE_CXX_FLAGS=-Xclang -fno-pch-timestamp' \
-            '-DCMAKE_OBJCXX_FLAGS=-Xclang -fno-pch-timestamp' \
-            "-DTDESKTOP_API_ID=$TDESKTOP_API_ID" \
-            "-DTDESKTOP_API_HASH=$TDESKTOP_API_HASH" \
-            -DDESKTOP_APP_DISABLE_AUTOUPDATE=ON \
-            -DDESKTOP_APP_DISABLE_CRASH_REPORTS=ON
-          python3 build/check_macos_release.py ../out \
-            --architectures "$ARCHITECTURE"
-          cmake --build ../out --parallel 3 --target Telegram
-          ccache --show-stats
-          mkdir -p "../mac-apps/$ARCHITECTURE"
-          ditto ../out/AyuGram.app "../mac-apps/$ARCHITECTURE/AyuGram.app"
-          tar -C ../mac-apps -cf "../mac-apps/$ARCHITECTURE.tar" "$ARCHITECTURE"
-      - name: Save compiler cache
-        if: always() && steps.compiler-cache.outputs.cache-primary-key != '' && steps.compiler-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+          repo-name: ${{ env.REPO_NAME }}
+          architecture: ${{ matrix.architecture }}
+          swift-target: ${{ matrix.swift_target }}
+          revision: ${{ github.sha }}
+          api-id: ${{ vars.TDESKTOP_API_ID }}
+          api-hash: ${{ secrets.TDESKTOP_API_HASH }}
+          save-cache: 'true'
       - uses: actions/upload-artifact@v7
         with:
           name: macos-app-${{ matrix.architecture }}-${{ github.sha }}
@@ -329,103 +269,21 @@ jobs:
           submodules: recursive
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
           persist-credentials: false
-      - name: Read toolchain and cache key
-        shell: bash
-        run: |
-          doc="$TBUILD/$REPO_NAME/docs/building-win.md"
-          sdk=$(sed -n 's/.*\*\*\([^*]*\)\*\* SDK version.*/\1/p' "$doc" | head -1)
-          test -n "$sdk"
-          key=$( { sha256sum "$TBUILD/$REPO_NAME/Telegram/build/prepare/prepare.py"; printf '%s\n' "$sdk"; } | sha256sum | cut -d' ' -f1)
-          echo "SDK=$sdk" >> "$GITHUB_ENV"
-          echo "CACHE_KEY=$key" >> "$GITHUB_ENV"
-      - name: Install Visual Studio ATL component
-        run: |
-          $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
-          $vswhere = Join-Path $installer 'vswhere.exe'
-          $setup = Join-Path $installer 'setup.exe'
-          $toolsComponent = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64'
-          $atlComponent = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL'
-          $path = @(& $vswhere -latest -products '*' -requires $toolsComponent -property installationPath)[0]
-          if (-not $path) { throw "No Visual Studio instance provides $toolsComponent." }
-          $toolset = Get-ChildItem (Join-Path $path 'VC\Tools\MSVC') -Directory |
-            Where-Object { $_.Name -like '14.44.*' } |
-            Sort-Object Name -Descending |
-            Select-Object -First 1
-          $header = Join-Path $toolset.FullName 'atlmfc\include\atlbase.h'
-          if (-not (Test-Path $header)) {
-            $process = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
-              'modify', '--installPath', "`"$path`"", '--add', $atlComponent,
-              '--quiet', '--norestart', '--nocache')
-            if ($process.ExitCode -notin @(0, 3010)) { exit $process.ExitCode }
-          }
-          if (-not (Test-Path $header)) { throw "ATL was not installed at $header." }
-      - name: Native Tools Command Prompt
-        uses: Eden-CI/msvc-dev-cmd@1bd71f95d6f3d1b2b3395b335cc63bcdc90cf223
-        with:
-          arch: x64
-          sdk: ${{ env.SDK }}
-          toolset: '14.44'
-      - name: Restore ThirdParty cache
-        id: third-party-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: ${{ env.TBUILD }}\ThirdParty
-          key: windows-x64-third-party-${{ env.CACHE_KEY }}
-          restore-keys: windows-x64-third-party-
-      - name: Restore libraries cache
-        id: libraries-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: ${{ env.TBUILD }}\Libraries\win64
-          key: windows-x64-release-libraries-${{ env.CACHE_KEY }}
-          restore-keys: windows-x64-release-libraries-
       - name: Prepare libraries
-        shell: cmd
-        run: call %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat silent
-      - name: Prune libraries
-        shell: bash
-        run: find "$TBUILD/Libraries/win64" '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
-      - name: Save ThirdParty cache
-        if: steps.third-party-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: ./TBuild/AyuGramDesktop/.github/actions/windows-libraries
         with:
-          path: ${{ env.TBUILD }}\ThirdParty
-          key: ${{ steps.third-party-cache.outputs.cache-primary-key }}
-      - name: Save libraries cache
-        if: steps.libraries-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+          build-root: ${{ env.TBUILD }}
+          repo-name: ${{ env.REPO_NAME }}
+          save-cache: 'true'
+      - name: Compile
+        uses: ./TBuild/AyuGramDesktop/.github/actions/windows-compile
         with:
-          path: ${{ env.TBUILD }}\Libraries\win64
-          key: ${{ steps.libraries-cache.outputs.cache-primary-key }}
-      - name: Configure Release
-        shell: cmd
-        run: |
-          cd /d %TBUILD%\%REPO_NAME%\Telegram
-          call configure.bat -G "Ninja Multi-Config" ^
-            -D CMAKE_CONFIGURATION_TYPES=Release ^
-            -D CMAKE_EXPORT_COMPILE_COMMANDS=ON ^
-            "-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=" ^
-            -D "TDESKTOP_API_ID=%TDESKTOP_API_ID%" ^
-            -D "TDESKTOP_API_HASH=%TDESKTOP_API_HASH%" ^
-            -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
-            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
-      - name: Verify Release configuration
-        run: |
-          $out = Join-Path $env:TBUILD "$env:REPO_NAME\out"
-          $cache = @{}
-          Get-Content (Join-Path $out 'CMakeCache.txt') | ForEach-Object {
-            if ($_ -match '^([^:#/][^:=]*):[^=]+=(.*)$') { $cache[$Matches[1]] = $Matches[2] }
-          }
-          if ($cache['CMAKE_CONFIGURATION_TYPES'] -ne 'Release') { throw 'Not a Release-only build.' }
-          if ($cache['DESKTOP_APP_DISABLE_AUTOUPDATE'] -ne 'ON') { throw 'Updater is enabled.' }
-          $commands = Get-Content (Join-Path $out 'compile_commands.json') -Raw
-          if ($commands -notmatch 'Telegram[/\\]SourceFiles' -or $commands -notmatch '(/O2|-O2)' -or $commands -notmatch 'NDEBUG') {
-            throw 'Release compilation flags were not generated.'
-          }
-          if ($commands -match ' /Z(7|i) ') { throw 'Release objects include debug information.' }
-      - name: Build AyuGram
-        shell: cmd
-        run: cmake --build %TBUILD%\%REPO_NAME%\out --config Release --parallel --target Telegram
+          build-root: ${{ env.TBUILD }}
+          repo-name: ${{ env.REPO_NAME }}
+          revision: ${{ github.sha }}
+          api-id: ${{ vars.TDESKTOP_API_ID }}
+          api-hash: ${{ secrets.TDESKTOP_API_HASH }}
+          save-cache: 'true'
       - name: Verify and package Windows artifacts
         run: |
           $repo = Join-Path $env:TBUILD $env:REPO_NAME
@@ -451,7 +309,7 @@ jobs:
           $d3d = Join-Path $out 'modules\x64\d3d\d3dcompiler_47.dll'
           if (-not (Test-Path $d3d)) { throw 'D3D compiler module is missing.' }
           if (-not (Test-Path (Join-Path $repo 'Telegram\Resources\art\icon256.ico'))) { throw 'Windows application icon is missing.' }
-          choco install innosetup --no-progress -y
+          choco install innosetup --version=6.7.1 --no-progress -y
           $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           & $iscc "/dMyAppVersion=$env:VERSION" "/dMyAppVersionZero=$env:VERSION" "/dMyAppVersionFull=$env:VERSION" "/dReleasePath=$out" '/dMyBuildTarget=win64' '/dAyuGramUnsigned=1' '/dAyuGramNoUpdater=1' (Join-Path $repo 'Telegram\build\setup.iss')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
