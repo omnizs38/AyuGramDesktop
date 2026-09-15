@@ -72,6 +72,9 @@ settings.local.json
 # AI work folder (session-specific, not for version control)
 .ai
 
+# Local release status notes; the source archive must not carry them
+/PROJECT_STATUS.md
+
 # Generated changelog page (built by CI, deployed to GitHub Pages)
 /docs/changelog/
 
