@@ -119,6 +119,7 @@ runs:
       run: |
         python "$BUILD_ROOT/$REPO/Telegram/build/ninja_log_stats.py" "$BUILD_ROOT/$REPO/out/.ninja_log" \
           --title 'Windows x64 Release' --markdown-file "$GITHUB_STEP_SUMMARY"
+        df -h || true
         {
           echo
           echo '<details><summary>Windows compiler cache and disk</summary>'

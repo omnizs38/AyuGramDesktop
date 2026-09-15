@@ -127,8 +127,11 @@ jobs:
           api-hash: ${{ secrets.TDESKTOP_API_HASH }}
           save-cache: 'true'
 
-  windows:
-    name: Windows x64
+  # Split because building the dependencies from source and compiling the
+  # application do not fit on one runner's disk. Each job now repeats a profile
+  # known to fit, at the price of a second checkout and toolchain install.
+  windows-libraries:
+    name: Windows x64 libraries
     needs: [resolve, prune]
     runs-on: windows-latest
     timeout-minutes: 350
@@ -163,6 +166,43 @@ jobs:
           build-root: ${{ env.TBUILD }}
           repo-name: ${{ env.REPO_NAME }}
           save-cache: 'true'
+
+  windows:
+    name: Windows x64
+    needs: [resolve, windows-libraries]
+    runs-on: windows-latest
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Prepare directories
+        run: |
+          $build = Join-Path $env:USERPROFILE 'TBuild'
+          New-Item -ItemType Directory -Force (Join-Path $build 'Libraries\win64') | Out-Null
+          New-Item -ItemType Junction -Path (Join-Path $env:GITHUB_WORKSPACE 'TBuild') -Target $build | Out-Null
+          "TBUILD=$(Join-Path $env:GITHUB_WORKSPACE 'TBuild')" | Out-File $env:GITHUB_ENV -Append
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          submodules: recursive
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+          persist-credentials: false
+      - name: Verify the action contract
+        shell: bash
+        env:
+          ACTIONS: ${{ env.TBUILD }}\${{ env.REPO_NAME }}\.github\actions
+        run: |
+          for action in windows-libraries windows-compile; do
+            grep -q '^  save-cache:' "$ACTIONS/$action/action.yml" \
+              || { echo "$action on the warmed branch cannot save caches." >&2; exit 1; }
+          done
+      - name: Restore libraries
+        uses: ./TBuild/AyuGramDesktop/.github/actions/windows-libraries
+        with:
+          build-root: ${{ env.TBUILD }}
+          repo-name: ${{ env.REPO_NAME }}
+          save-cache: 'false'
       - name: Compile
         uses: ./TBuild/AyuGramDesktop/.github/actions/windows-compile
         with:
@@ -175,7 +215,7 @@ jobs:
 
   prune-after:
     name: Prune superseded caches
-    needs: [resolve, macos, windows]
+    needs: [resolve, macos, windows-libraries, windows]
     if: always() && needs.resolve.result == 'success'
     permissions:
       actions: write
@@ -183,7 +223,7 @@ jobs:
 
   report:
     name: Report caches
-    needs: [resolve, macos, windows, prune-after]
+    needs: [resolve, macos, windows-libraries, windows, prune-after]
     if: always() && needs.resolve.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10

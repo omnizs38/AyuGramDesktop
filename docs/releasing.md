@@ -88,6 +88,15 @@ one compiles. A single recipe is the point. A cache saved under a different key
 or from a different directory layout is useless to the other workflow, and the
 divergence is silent.
 
+On Windows the warming workflow runs those two actions in two separate jobs.
+Building the dependencies from source and compiling the application do not fit
+on one runner's disk; the first cold warm ran out of space at the end of the
+compile, four hours in. A release job never meets this because it only restores
+the dependencies, and neither does a warm run once the dependency cache exists
+— but the run after upstream touches `prepare.py` or the SDK version does. Split,
+each job repeats a profile known to fit, and the cost is a second checkout and
+toolchain install, about ten minutes on every warm run.
+
 Two GitHub rules make a release branch start cold. A cache that nothing has read
 for seven days is evicted, and a run reaches only caches from its own branch or
 from the default branch, while a release branch is renamed every version.
