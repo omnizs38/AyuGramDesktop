@@ -120,7 +120,6 @@ jobs:
         uses: ./AyuGramDesktop/.github/actions/macos-libraries
         with:
           repo-name: ${{ env.REPO_NAME }}
-          save-cache: 'true'
       - name: Compile
         uses: ./AyuGramDesktop/.github/actions/macos-compile
         with:
@@ -130,7 +129,6 @@ jobs:
           revision: ${{ github.sha }}
           api-id: ${{ vars.TDESKTOP_API_ID }}
           api-hash: ${{ secrets.TDESKTOP_API_HASH }}
-          save-cache: 'true'
       - uses: actions/upload-artifact@v7
         with:
           name: macos-app-${{ matrix.architecture }}-${{ github.sha }}
@@ -274,7 +272,6 @@ jobs:
         with:
           build-root: ${{ env.TBUILD }}
           repo-name: ${{ env.REPO_NAME }}
-          save-cache: 'true'
       - name: Compile
         uses: ./TBuild/AyuGramDesktop/.github/actions/windows-compile
         with:
@@ -283,7 +280,6 @@ jobs:
           revision: ${{ github.sha }}
           api-id: ${{ vars.TDESKTOP_API_ID }}
           api-hash: ${{ secrets.TDESKTOP_API_HASH }}
-          save-cache: 'true'
       - name: Verify and package Windows artifacts
         run: |
           $repo = Join-Path $env:TBUILD $env:REPO_NAME

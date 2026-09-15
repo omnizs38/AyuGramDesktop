@@ -22,7 +22,7 @@ runs:
         brew install automake libtool meson nasm ninja pkg-config wget ccache
         sudo xcode-select -s "$DEVELOPER_DIR"
         echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
-        toolchain_id=$( { xcodebuild -version; xcrun --sdk macosx --show-sdk-version; cmake --version; } | shasum -a 256 | cut -c1-16)
+        toolchain_id=$( { xcodebuild -version; xcrun --sdk macosx --show-sdk-version; } | shasum -a 256 | cut -c1-16)
         echo "id=$toolchain_id" >> "$GITHUB_OUTPUT"
     - name: Restore libraries cache
       id: libraries-cache
