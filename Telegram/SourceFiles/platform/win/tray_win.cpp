@@ -146,13 +146,12 @@ bool DarkTasbarValueValid/* = false*/;
 		} else if (monochrome && darkMode) {
 			return MonochromeIconFor(args.size, *darkMode);
 		}
-		return scaled.emplace(
-			args.size,
-			(smallIcon
-				? Window::LogoNoMargin()
-				: Window::Logo()
-			).scaledToWidth(args.size, Qt::SmoothTransformation)
-		).first->second;
+		auto image = (smallIcon
+			? Window::LogoNoMargin()
+			: Window::Logo()
+		).scaledToWidth(args.size, Qt::SmoothTransformation);
+		image.setDevicePixelRatio(1.);
+		return scaled.emplace(args.size, std::move(image)).first->second;
 	}();
 	if ((!monochrome || !darkMode) && supportMode) {
 		Window::ConvertIconToBlack(result);

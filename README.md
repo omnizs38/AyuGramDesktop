@@ -4,6 +4,15 @@
 
 [ English  |   [Русский](README-RU.md) ]
 
+This maintenance fork provides current AyuGram builds while upstream releases
+are paused. It adds no fork-specific features or personal branding, preserves
+upstream attribution, and offers maintenance changes back to the main project.
+These builds are not official upstream releases.
+
+Version 7.2.5 builds on [PR #460](https://github.com/AyuGram/AyuGramDesktop/pull/460).
+Release artifacts are built from the tagged source by GitHub Actions with
+automatic updates disabled. See [release details](docs/releasing.md).
+
 ## Features
 
 - Full ghost mode (flexible)
@@ -36,6 +45,11 @@ And many more. Check out our [Documentation](https://docs.ayugram.one/desktop/).
 </h3>
 
 ## Downloads
+
+Technical maintenance builds for macOS and Windows are available from this
+fork's [Releases](https://github.com/oviron/AyuGramDesktop/releases). They are
+not publisher-signed or notarized; verify `SHA256SUMS.txt` before installation.
+Package-manager commands below still belong to upstream or their maintainers.
 
 ### Windows
 

@@ -1,0 +1,412 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Build all release artifacts or one diagnostic component
+        type: choice
+        default: all
+        options: [all, macos, windows, source]
+      keep_diagnostic_artifact:
+        description: Keep a diagnostic artifact for one day
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Duplicated as a literal in every `uses: ./...` path below, because `uses:`
+  # forbids expressions. Change the four literals together with this value.
+  REPO_NAME: AyuGramDesktop
+  VERSION: 7.2.8
+
+jobs:
+  validate:
+    name: Validate release head
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Match source version and release ref
+        run: |
+          test "$GITHUB_REF" = "refs/heads/codex/ayu-$VERSION"
+          test "$(awk '$1 == "AppVersionStr" { print $2 }' Telegram/build/version)" = "$VERSION"
+          test "$(awk '$1 == "AppVersionOriginal" { print $2 }' Telegram/build/version)" = "$VERSION"
+          test "$(awk '$1 == "BetaChannel" { print $2 }' Telegram/build/version)" = 0
+          test "$(awk '$1 == "AlphaVersion" { print $2 }' Telegram/build/version)" = 0
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [ "${{ inputs.component }}" = all ]; then
+            test -z "$(git ls-remote --tags origin "refs/tags/v$VERSION")"
+          fi
+          test ! -d Telegram/Resources/ayu/languages
+
+  source:
+    name: Full source archive
+    needs: validate
+    if: inputs.component == 'all' || inputs.component == 'source'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Archive source and pinned submodules
+        run: |
+          root="AyuGramDesktop-$VERSION"
+          archive="$RUNNER_TEMP/$root-full.tar"
+          git archive --format=tar --prefix="$root/" HEAD -o "$archive"
+          while read -r revision path rest; do
+            revision="${revision#[-+U]}"
+            test "$(git -C "$path" rev-parse HEAD)" = "$revision"
+            part="$RUNNER_TEMP/submodule-$(printf '%s' "$path" | sha256sum | cut -c1-16).tar"
+            git -C "$path" archive --format=tar --prefix="$root/$path/" "$revision" -o "$part"
+            tar --concatenate --file="$archive" "$part"
+          done < <(git submodule status --recursive)
+          gzip -9 -n "$archive"
+          mkdir artifacts
+          mv "$archive.gz" "artifacts/AyuGramDesktop-$VERSION-full.tar.gz"
+          tar -tzf "artifacts/AyuGramDesktop-$VERSION-full.tar.gz" > "$RUNNER_TEMP/source-files.txt"
+          grep -qx "$root/Telegram/build/version" "$RUNNER_TEMP/source-files.txt"
+          ! grep -q "$root/Telegram/Resources/ayu/languages/" "$RUNNER_TEMP/source-files.txt"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-source-${{ github.sha }}
+          path: artifacts/AyuGramDesktop-${{ env.VERSION }}-full.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  macos-build:
+    name: macOS ${{ matrix.architecture }} Release
+    needs: validate
+    if: inputs.component == 'all' || inputs.component == 'macos'
+    runs-on: macos-15
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            swift_target: arm64-apple-macos11.0
+          - architecture: x86_64
+            swift_target: x86_64-apple-macos10.13
+    env:
+      TDESKTOP_API_ID: ${{ vars.TDESKTOP_API_ID }}
+      TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+    steps:
+      - name: Validate application credentials
+        run: |
+          if [[ ! "$TDESKTOP_API_ID" =~ ^[1-9][0-9]*$ || ! "$TDESKTOP_API_HASH" =~ ^[[:xdigit:]]{32}$ ]]; then
+            echo 'Set TDESKTOP_API_ID and TDESKTOP_API_HASH in repository Actions settings.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          path: ${{ env.REPO_NAME }}
+          persist-credentials: false
+      - name: Prepare libraries
+        uses: ./AyuGramDesktop/.github/actions/macos-libraries
+        with:
+          repo-name: ${{ env.REPO_NAME }}
+      - name: Compile
+        uses: ./AyuGramDesktop/.github/actions/macos-compile
+        with:
+          repo-name: ${{ env.REPO_NAME }}
+          architecture: ${{ matrix.architecture }}
+          swift-target: ${{ matrix.swift_target }}
+          revision: ${{ github.sha }}
+          api-id: ${{ vars.TDESKTOP_API_ID }}
+          api-hash: ${{ secrets.TDESKTOP_API_HASH }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-app-${{ matrix.architecture }}-${{ github.sha }}
+          path: ${{ env.REPO_NAME }}/mac-apps/${{ matrix.architecture }}.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  macos:
+    name: macOS universal Release
+    needs: macos-build
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: macos-app-*-${{ github.sha }}
+          path: ${{ env.REPO_NAME }}/mac-apps
+          merge-multiple: true
+      - name: Verify app and create DMG
+        working-directory: ${{ env.REPO_NAME }}
+        run: |
+          trap 'echo "macOS packaging failed at line $LINENO." >&2' ERR
+          tar -C mac-apps -xf mac-apps/arm64.tar
+          tar -C mac-apps -xf mac-apps/x86_64.tar
+          app=release/AyuGram.app
+          arm=mac-apps/arm64/AyuGram.app
+          intel=mac-apps/x86_64/AyuGram.app
+          rm -rf release dmg artifacts
+          mkdir -p release
+          ditto "$arm" "$app"
+          if [[ ! -s "$app/Contents/MacOS/AyuGram" ]]; then
+            echo 'AyuGram executable is missing after copying the arm64 bundle.' >&2
+            find "$app/Contents" -maxdepth 3 -print >&2
+            exit 1
+          fi
+          while IFS= read -r -d '' arm_file; do
+            if ! file "$arm_file" | grep -q 'Mach-O'; then continue; fi
+            relative=${arm_file#"$arm/"}
+            intel_file="$intel/$relative"
+            output="$app/$relative"
+            test -f "$intel_file"
+            arm_archs=" $(lipo -archs "$arm_file") "
+            intel_archs=" $(lipo -archs "$intel_file") "
+            if [[ "$arm_archs" == *' arm64 '* && "$arm_archs" == *' x86_64 '* ]]; then
+              continue
+            fi
+            if [[ "$relative" == Contents/Frameworks/libswift*.dylib && "$arm_archs" == "$intel_archs" ]]; then
+              if [[ "$arm_archs" != *' x86_64 '* ]]; then
+                echo "Unsupported matching Swift fallback architectures for $relative:$arm_archs" >&2
+                exit 1
+              fi
+              continue
+            fi
+            [[ "$arm_archs" == *' arm64 '* && "$intel_archs" == *' x86_64 '* ]]
+            lipo -create "$arm_file" "$intel_file" -output "$output"
+          done < <(find "$arm" -type f -print0)
+          while IFS= read -r -d '' output_file; do
+            if ! file "$output_file" | grep -q 'Mach-O'; then continue; fi
+            relative=${output_file#"$app/"}
+            output_archs=" $(lipo -archs "$output_file") "
+            if [[ "$relative" == Contents/Frameworks/libswift*.dylib ]]; then
+              if [[ "$output_archs" != *' x86_64 '* ]]; then
+                echo "Swift fallback $relative has unsupported architectures:$output_archs" >&2
+                exit 1
+              fi
+              continue
+            fi
+            [[ "$output_archs" == *' arm64 '* && "$output_archs" == *' x86_64 '* ]]
+          done < <(find "$app" -type f -print0)
+          if [[ ! -s "$app/Contents/MacOS/AyuGram" ]]; then
+            echo 'AyuGram executable is missing after merging the bundles.' >&2
+            find "$app/Contents" -maxdepth 3 -print >&2
+            exit 1
+          fi
+          test -s "$app/Contents/Resources/Telegram.rcc"
+          test -s "$app/Contents/Resources/AppIcon-Default.icns"
+          test "$(lipo -archs "$app/Contents/MacOS/AyuGram" | tr ' ' '\n' | sort | tr '\n' ' ')" = 'arm64 x86_64 '
+          test "$(plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")" = one.ayugram.AyuGramDesktop
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
+          test "$(plutil -extract CFBundleVersion raw -o - "$app/Contents/Info.plist")" = "$VERSION"
+          icon_name=$(plutil -extract CFBundleIconFile raw -o - "$app/Contents/Info.plist")
+          test -s "$app/Contents/Resources/$icon_name"
+          test ! -e "$app/Contents/Frameworks/Updater"
+          /usr/bin/strip -S "$app/Contents/MacOS/AyuGram"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app"
+          mkdir -p dmg artifacts
+          ditto "$app" dmg/AyuGram.app
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname AyuGram -srcfolder dmg -ov -format UDZO artifacts/AyuGram.dmg
+          mkdir "$RUNNER_TEMP/ayugram-mount"
+          device=$(hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/ayugram-mount" artifacts/AyuGram.dmg | awk '/^\/dev\// { print $1; exit }')
+          test -n "$device"
+          trap 'hdiutil detach "$device"' EXIT
+          test -s "$RUNNER_TEMP/ayugram-mount/AyuGram.app/Contents/MacOS/AyuGram"
+          codesign --verify --deep --strict "$RUNNER_TEMP/ayugram-mount/AyuGram.app"
+          test "$(lipo -archs "$RUNNER_TEMP/ayugram-mount/AyuGram.app/Contents/MacOS/AyuGram" | tr ' ' '\n' | sort | tr '\n' ' ')" = 'arm64 x86_64 '
+          hdiutil detach "$device"
+          trap - EXIT
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-${{ github.sha }}
+          path: ${{ env.REPO_NAME }}/artifacts/AyuGram.dmg
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  windows:
+    name: Windows x64 Release
+    needs: validate
+    if: inputs.component == 'all' || inputs.component == 'windows'
+    runs-on: windows-latest
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TDESKTOP_API_ID: ${{ vars.TDESKTOP_API_ID }}
+      TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+    steps:
+      - name: Validate application credentials
+        run: |
+          if ($env:TDESKTOP_API_ID -notmatch '^[1-9][0-9]*$' -or $env:TDESKTOP_API_HASH -notmatch '^[0-9a-fA-F]{32}$') {
+            throw 'Set TDESKTOP_API_ID and TDESKTOP_API_HASH in repository Actions settings.'
+          }
+      - name: Prepare directories
+        run: |
+          # Build on the workspace drive. The runner image leaves about 25 GB
+          # free on C:, which a Release build does not fit into.
+          $build = Join-Path $env:GITHUB_WORKSPACE 'TBuild'
+          New-Item -ItemType Directory -Force (Join-Path $build 'Libraries\win64') | Out-Null
+          "TBUILD=$build" | Out-File $env:GITHUB_ENV -Append
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+          persist-credentials: false
+      - name: Prepare libraries
+        uses: ./TBuild/AyuGramDesktop/.github/actions/windows-libraries
+        with:
+          build-root: ${{ env.TBUILD }}
+          repo-name: ${{ env.REPO_NAME }}
+      - name: Compile
+        uses: ./TBuild/AyuGramDesktop/.github/actions/windows-compile
+        with:
+          build-root: ${{ env.TBUILD }}
+          repo-name: ${{ env.REPO_NAME }}
+          revision: ${{ github.sha }}
+          api-id: ${{ vars.TDESKTOP_API_ID }}
+          api-hash: ${{ secrets.TDESKTOP_API_HASH }}
+      - name: Verify and package Windows artifacts
+        run: |
+          $repo = Join-Path $env:TBUILD $env:REPO_NAME
+          $out = Join-Path $repo 'out\Release'
+          $binary = Join-Path $out 'AyuGram.exe'
+          if (-not (Test-Path $binary)) { throw 'AyuGram.exe was not built.' }
+          if (Test-Path (Join-Path $out 'Updater.exe')) { throw 'Updater.exe must not be built.' }
+          $stream = [IO.File]::OpenRead($binary)
+          try {
+            $reader = [IO.BinaryReader]::new($stream)
+            $stream.Position = 0x3c
+            $pe = $reader.ReadInt32()
+            $stream.Position = $pe + 4
+            $machine = $reader.ReadUInt16()
+          } finally {
+            $stream.Dispose()
+          }
+          if ($machine -ne 0x8664) { throw "Unexpected PE machine: 0x$($machine.ToString('x4'))." }
+          $version = (Get-Item $binary).VersionInfo.ProductVersion
+          if ($version -ne "$env:VERSION.0") { throw "Unexpected product version: $version." }
+          $signature = Get-AuthenticodeSignature $binary
+          if ($signature.Status -ne 'NotSigned') { throw "Unexpected application signature status: $($signature.Status)." }
+          $d3d = Join-Path $out 'modules\x64\d3d\d3dcompiler_47.dll'
+          if (-not (Test-Path $d3d)) { throw 'D3D compiler module is missing.' }
+          if (-not (Test-Path (Join-Path $repo 'Telegram\Resources\art\icon256.ico'))) { throw 'Windows application icon is missing.' }
+          choco install innosetup --version=6.7.1 --no-progress -y
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          & $iscc "/dMyAppVersion=$env:VERSION" "/dMyAppVersionZero=$env:VERSION" "/dMyAppVersionFull=$env:VERSION" "/dReleasePath=$out" '/dMyBuildTarget=win64' '/dAyuGramUnsigned=1' '/dAyuGramNoUpdater=1' (Join-Path $repo 'Telegram\build\setup.iss')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $setup = Join-Path $out "ayusetup-x64.$env:VERSION.exe"
+          if (-not (Test-Path $setup)) { throw 'Installer was not created.' }
+          if ((Get-AuthenticodeSignature $setup).Status -ne 'NotSigned') { throw 'Unexpected installer signature.' }
+          $artifacts = Join-Path $repo 'artifacts'
+          New-Item -ItemType Directory -Force $artifacts | Out-Null
+          Copy-Item $setup (Join-Path $artifacts 'AyuGram.exe')
+          $portable = Join-Path $env:RUNNER_TEMP 'AyuGram'
+          New-Item -ItemType Directory -Force (Join-Path $portable 'TelegramForcePortable') | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $portable 'modules\x64\d3d') | Out-Null
+          Copy-Item $binary (Join-Path $portable 'AyuGram.exe')
+          Copy-Item $d3d (Join-Path $portable 'modules\x64\d3d\d3dcompiler_47.dll')
+          & 7z a -mx9 (Join-Path $artifacts 'AyuGram.zip') $portable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & 7z t (Join-Path $artifacts 'AyuGram.zip')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $install = Join-Path $env:RUNNER_TEMP 'installed-AyuGram'
+          $process = Start-Process (Join-Path $artifacts 'AyuGram.exe') -Wait -PassThru -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$install")
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+          if (-not (Test-Path (Join-Path $install 'AyuGram.exe'))) { throw 'Installed application is missing.' }
+          if (Test-Path (Join-Path $install 'Updater.exe')) { throw 'Installer included the updater.' }
+          if (-not (Test-Path (Join-Path $install 'modules\x64\d3d\d3dcompiler_47.dll'))) { throw 'Installer omitted the D3D module.' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-${{ github.sha }}
+          path: |
+            ${{ env.TBUILD }}\${{ env.REPO_NAME }}\artifacts\AyuGram.exe
+            ${{ env.TBUILD }}\${{ env.REPO_NAME }}\artifacts\AyuGram.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: [source, macos, windows]
+    if: inputs.component == 'all'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*-${{ github.sha }}
+          path: release
+          merge-multiple: true
+      - name: Verify files and checksums
+        run: |
+          cd release
+          expected=(AyuGram.dmg AyuGram.exe AyuGram.zip "AyuGramDesktop-$VERSION-full.tar.gz")
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 4
+          for file in "${expected[@]}"; do test -s "$file"; done
+          sha256sum "${expected[@]}" > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+      - name: Publish exact-head release
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Technical maintenance build of AyuGram $VERSION from commit \`$GITHUB_SHA\`.
+
+          - \`AyuGram.dmg\`: universal macOS application (Apple Silicon and Intel)
+          - \`AyuGram.exe\`: Windows x64 installer
+          - \`AyuGram.zip\`: Windows x64 portable application
+          - \`AyuGramDesktop-$VERSION-full.tar.gz\`: source with pinned submodules
+
+          Automatic updates are disabled. The macOS application has an ad-hoc
+          integrity signature and is not notarized. Windows binaries are not
+          Authenticode-signed. Verify downloads with \`SHA256SUMS.txt\`.
+          EOF
+          gh release create "v$VERSION" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "AyuGram $VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --latest
+
+  cleanup:
+    name: Remove temporary release artifacts
+    needs: [validate, source, macos, windows, publish]
+    if: always() && (inputs.component == 'all' || inputs.keep_diagnostic_artifact != true)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Delete artifacts from this run
+        run: |
+          set -euo pipefail
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[].id' |
+          while IFS= read -r artifact_id; do
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+          done
+          test "$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --jq '.total_count')" -eq 0
