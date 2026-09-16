@@ -2,6 +2,7 @@ Unstaged changes after reset:
 M	Telegram/SourceFiles/ui/controls/who_reacted_context_action.cpp
 M	Telegram/SourceFiles/window/window_peer_menu.cpp
 Traceback (most recent call last):
-  File "<stdin>", line 215, in <module>
-  File "<stdin>", line 15, in replace_once
-RuntimeError: gif grouped draw: expected one match, found 0 in Telegram/SourceFiles/history/view/media/history_view_gif.cpp
+  File "<stdin>", line 19, in <module>
+  File "ported-pr-430.py", line 246, in <module>
+  File "ported-pr-430.py", line 17, in replace_once
+RuntimeError: grouped media spoiler tag: expected one match, found 0 in Telegram/SourceFiles/history/view/media/history_view_media_grouped.cpp
