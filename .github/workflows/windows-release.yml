@@ -128,6 +128,7 @@ jobs:
         with:
           build-root: ${{ env.TBUILD }}
           repo-name: ${{ env.REPO_NAME }}
+          save-cache: 'true'
       - name: Compile with Windows 11 SDK
         uses: ./TBuild/AyuGramDesktop/.github/actions/windows-compile
         with:
@@ -137,6 +138,7 @@ jobs:
           api-id: ${{ steps.credentials.outputs.api-id }}
           api-hash: ${{ steps.credentials.outputs.api-hash }}
           windows-sdk: ${{ env.WINDOWS_SDK }}
+          save-cache: 'true'
       - name: Verify and package Windows artifacts
         run: |
           $repo = Join-Path $env:TBUILD $env:REPO_NAME
