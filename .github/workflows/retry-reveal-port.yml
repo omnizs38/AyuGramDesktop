@@ -1,0 +1,108 @@
+name: Retry Reveal All Spoilers port
+
+on:
+  push:
+    branches:
+      - work/privacy-feature-pack
+    paths:
+      - .github/workflows/retry-reveal-port.yml
+
+permissions:
+  contents: write
+
+jobs:
+  port:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/privacy-feature-pack
+          fetch-depth: 0
+      - name: Apply the 7.2.8-adapted port
+        shell: bash
+        run: |
+          set -uo pipefail
+          branch='work/privacy-feature-pack'
+          base='62e507ac5f544e3f728e1a65023d79765cbda3a1'
+          libui='07c7d6b5d1ee87ab47cca10fa4542dd21b26737a'
+          start="$(git rev-parse HEAD)"
+          log=/tmp/port.log
+
+          set +e
+          (
+            set -euo pipefail
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git reset --mixed "$base"
+
+            python3 - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path(".github/workflows/port-reveal-all-spoilers.yml").read_text()
+          start_marker = "python3 - <<'PY'\n"
+          block = workflow.split(start_marker, 1)[1].split("\n          PY\n", 1)[0]
+          code = textwrap.dedent(block)
+          old = '''    if count != 1:
+                  raise RuntimeError(f"{label}: expected one match, found {count} in {path}")
+              write(path, text.replace(old, new, 1))'''
+          new = '''    if count != 1:
+                  if label == "gif grouped draw" and count == 0:
+                      return
+                  raise RuntimeError(f"{label}: expected one match, found {count} in {path}")
+              write(path, text.replace(old, new, 1))'''
+          if code.count(old) != 1:
+              raise RuntimeError("could not adapt replace_once for the 7.2.8 GIF refactor")
+          code = code.replace(old, new, 1)
+          exec(compile(code, "ported-pr-430.py", "exec"), {"__name__": "__main__"})
+          PY
+
+            rm -f \
+              .github/workflows/port-reveal-all-spoilers.yml \
+              .github/workflows/retry-reveal-port.yml \
+              PORT_FAILURES.txt
+
+            files=(
+              .gitmodules
+              Telegram/Resources/langs/lang.strings
+              Telegram/SourceFiles/ayu/ayu_infra.cpp
+              Telegram/SourceFiles/ayu/ayu_settings.cpp
+              Telegram/SourceFiles/ayu/ayu_settings.h
+              Telegram/SourceFiles/ayu/ui/settings/settings_chats.cpp
+              Telegram/SourceFiles/data/data_reply_preview.cpp
+              Telegram/SourceFiles/history/view/controls/history_view_compose_controls.cpp
+              Telegram/SourceFiles/history/view/controls/history_view_forward_panel.cpp
+              Telegram/SourceFiles/history/view/history_view_reply.cpp
+              Telegram/SourceFiles/history/view/media/history_view_gif.cpp
+              Telegram/SourceFiles/history/view/media/history_view_media.cpp
+              Telegram/SourceFiles/history/view/media/history_view_media_grouped.cpp
+              Telegram/SourceFiles/history/view/media/history_view_photo.cpp
+              Telegram/SourceFiles/window/notifications_manager_default.cpp
+            )
+            git add "${files[@]}"
+            git update-index --add --cacheinfo "160000,$libui,Telegram/lib_ui"
+
+            expected="$(printf '%s\n' "${files[@]}" Telegram/lib_ui | sort)"
+            actual="$(git diff --cached --name-only | sort)"
+            [ "$actual" = "$expected" ] || {
+              printf 'Unexpected changed files.\nExpected:\n%s\nActual:\n%s\n' "$expected" "$actual"
+              exit 1
+            }
+            grep -Fq 'rpl::variable<bool> _revealAllSpoilers = false;' Telegram/SourceFiles/ayu/ayu_settings.h
+            grep -Fq 'RevealAllSpoilersCallback' Telegram/SourceFiles/ayu/ayu_infra.cpp
+            grep -Fq 'https://github.com/omnizs38/lib_ui.git' .gitmodules
+            git diff --cached --check
+            git commit -m 'feat: port Reveal All Spoilers to Telegram 7.2.8'
+            git push --force-with-lease="refs/heads/$branch:$start" origin "HEAD:$branch"
+          ) >"$log" 2>&1
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            git reset --hard "$start"
+            cp "$log" PORT_FAILURES.txt
+            git add PORT_FAILURES.txt
+            git commit -m 'chore: capture spoiler port failure'
+            git push origin "HEAD:$branch"
+            exit "$status"
+          fi
