@@ -7,8 +7,13 @@
 #include "ayu/data/ayu_database.h"
 
 #include "ayu/data/entities.h"
+#include "ayu/libs/sqlite/sqlite3.h"
 #include "ayu/libs/sqlite/sqlite_orm.h"
 #include "base/unixtime.h"
+
+#include <QtCore/QFile>
+
+#include <stdexcept>
 
 using namespace sqlite_orm;
 auto storage = make_storage(
@@ -144,6 +149,91 @@ auto storage = make_storage(
 	)
 );
 
+namespace {
+
+constexpr auto kDatabaseBusyTimeoutMs = 5000;
+
+void ConfigureDatabaseOpen() {
+	storage.on_open = [](sqlite3 *database) {
+		const auto result = sqlite3_busy_timeout(
+			database,
+			kDatabaseBusyTimeoutMs);
+		if (result != SQLITE_OK) {
+			LOG(("Failed to set SQLite busy timeout: %1 (%2).")
+				.arg(result)
+				.arg(sqlite3_errmsg(database)));
+		}
+	};
+}
+
+void CheckDatabaseIntegrity() {
+	const auto result = storage.pragma.integrity_check();
+	if (result.size() == 1 && result.front() == "ok") {
+		return;
+	}
+	if (result.empty()) {
+		LOG(("Database integrity check failed without details."));
+	} else {
+		for (const auto &error : result) {
+			LOG(("Database integrity check failed: %1").arg(error.c_str()));
+		}
+	}
+	throw std::runtime_error("Database integrity check failed");
+}
+
+bool BackupDatabase(
+		const QString &sourcePath,
+		const QString &backupPath) {
+	auto source = QFile(sourcePath);
+	if (source.copy(backupPath)) {
+		LOG(("Database backup created at '%1'.").arg(backupPath));
+		return true;
+	}
+	LOG(("Failed to back up database from '%1' to '%2': %3.")
+		.arg(sourcePath, backupPath, source.errorString()));
+	return false;
+}
+
+bool MoveDatabaseFile(
+		const QString &sourcePath,
+		const QString &destinationPath) {
+	auto source = QFile(sourcePath);
+	if (!source.exists()) {
+		return true;
+	}
+	if (source.rename(destinationPath)) {
+		return true;
+	}
+	LOG(("Failed to move database file from '%1' to '%2': %3.")
+		.arg(sourcePath, destinationPath, source.errorString()));
+	return false;
+}
+
+bool BackupAndMoveCurrentDatabase() {
+	const auto time = base::unixtime::now();
+	const auto databasePath = u"./tdata/ayudata.db"_q;
+	const auto movedDatabasePath = u"./tdata/ayudata_%1.db"_q.arg(time);
+	if (QFile::exists(databasePath)) {
+		const auto backupPath = u"./tdata/ayudata_backup_%1.db"_q.arg(time);
+		if (!BackupDatabase(databasePath, backupPath)) {
+			return false;
+		}
+	}
+	if (!MoveDatabaseFile(databasePath, movedDatabasePath)) {
+		return false;
+	}
+	if (!MoveDatabaseFile(
+			databasePath + u"-shm"_q,
+			movedDatabasePath + u"-shm"_q)) {
+		return false;
+	}
+	return MoveDatabaseFile(
+		databasePath + u"-wal"_q,
+		movedDatabasePath + u"-wal"_q);
+}
+
+}
+
 namespace AyuMigrations {
 
 void migrateToV1(decltype(storage) &storage) {
@@ -158,7 +248,7 @@ void migrateToV1(decltype(storage) &storage) {
 
 }
 
-void runMigrations(decltype(storage) &storage) {
+bool runMigrations(decltype(storage) &storage) {
 	constexpr int kLatestVersion = 1;
 
 	const std::map<int, Fn<void(decltype(storage) &)>> migrations = {
@@ -179,7 +269,7 @@ void runMigrations(decltype(storage) &storage) {
 
 	if (currentVersion >= kLatestVersion) {
 		LOG(("Database is ok"));
-		return;
+		return true;
 	}
 
 	LOG(("Database version: %1. Latest version: %2.").arg(currentVersion).arg(kLatestVersion));
@@ -198,42 +288,37 @@ void runMigrations(decltype(storage) &storage) {
 			} catch (...) {
 				storage.rollback();
 				LOG(("Failed to apply migration for version: %1.").arg(v));
-				AyuDatabase::moveCurrentDatabase();
-
-				return;
+				return BackupAndMoveCurrentDatabase();
 			}
 		}
 	}
+	return true;
 }
 
 namespace AyuDatabase {
 
 void moveCurrentDatabase() {
-	const auto time = base::unixtime::now();
-
-	if (QFile::exists("./tdata/ayudata.db")) {
-		QFile::rename("./tdata/ayudata.db", QString("./tdata/ayudata_%1.db").arg(time));
-	}
-
-	if (QFile::exists("./tdata/ayudata.db-shm")) {
-		QFile::rename("./tdata/ayudata.db-shm", QString("./tdata/ayudata_%1.db-shm").arg(time));
-	}
-
-	if (QFile::exists("./tdata/ayudata.db-wal")) {
-		QFile::rename("./tdata/ayudata.db-wal", QString("./tdata/ayudata_%1.db-wal").arg(time));
+	if (!BackupAndMoveCurrentDatabase()) {
+		return;
 	}
 }
 
 void initialize() {
+	ConfigureDatabaseOpen();
 	try {
+		CheckDatabaseIntegrity();
 		storage.sync_schema(true);
 
-		runMigrations(storage);
+		if (!runMigrations(storage)) {
+			return;
+		}
 
 		storage.sync_schema(true);
 	} catch (const std::exception &ex) {
 		LOG(("Database initialization failed: %1").arg(ex.what()));
-		moveCurrentDatabase();
+		if (!BackupAndMoveCurrentDatabase()) {
+			return;
+		}
 
 		storage.sync_schema(true);
 		if (!storage.get_pointer<SchemaVersion>(1)) {
