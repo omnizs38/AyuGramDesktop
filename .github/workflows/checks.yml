@@ -32,6 +32,26 @@ jobs:
         run: python3 -B -m unittest discover -s Telegram/build -p 'test_*.py'
       - name: Preparation syntax
         run: python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Telegram/build/prepare/prepare.py").read_text())'
+      - name: CI script validation
+        run: shellcheck .github/scripts/package_linux.sh
+      - name: Linux package smoke test
+        run: |
+          cc -O2 -x c -o "$RUNNER_TEMP/linux-ci-smoke" - <<'EOF'
+          int main(void) { return 0; }
+          EOF
+          version=$(awk '$1 == "AppVersionStr" { print $2 }' Telegram/build/version)
+          revision=$(git rev-parse HEAD)
+          LINUX_CI_MAX_GLIBC=999 bash .github/scripts/package_linux.sh \
+            "$RUNNER_TEMP/linux-ci-smoke" "$version" "$revision" \
+            "$RUNNER_TEMP/linux-package-one" source-check-smoke
+          LINUX_CI_MAX_GLIBC=999 bash .github/scripts/package_linux.sh \
+            "$RUNNER_TEMP/linux-ci-smoke" "$version" "$revision" \
+            "$RUNNER_TEMP/linux-package-two" source-check-smoke
+          cmp \
+            "$RUNNER_TEMP/linux-package-one/AyuGram-$version-linux-x64.tar.xz" \
+            "$RUNNER_TEMP/linux-package-two/AyuGram-$version-linux-x64.tar.xz"
+          cd "$RUNNER_TEMP/linux-package-one"
+          sha256sum --check SHA256SUMS.txt
       - name: Workflow validation
         run: |
           set -o pipefail

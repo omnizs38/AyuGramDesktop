@@ -1,0 +1,122 @@
+name: Linux x64 build
+description: Build, verify and package the diagnostic Linux x64 artifact.
+
+inputs:
+  repo-name:
+    description: Name of the repository checkout directory inside the workspace.
+    required: true
+  version:
+    description: Expected application version.
+    required: true
+  revision:
+    description: Exact source revision recorded in the package metadata.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate source and public credentials
+      id: config
+      shell: bash
+      working-directory: ${{ inputs.repo-name }}
+      env:
+        EXPECTED_REVISION: ${{ inputs.revision }}
+        EXPECTED_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        test "$(uname -m)" = x86_64
+        test "$(git rev-parse HEAD)" = "$EXPECTED_REVISION"
+        test "$(awk '$1 == "AppVersionStr" { print $2 }' Telegram/build/version)" = "$EXPECTED_VERSION"
+        test "$(awk '$1 == "AppVersionOriginal" { print $2 }' Telegram/build/version)" = "$EXPECTED_VERSION"
+        test ! -d Telegram/Resources/ayu/languages
+        api_id=$(sed -n 's/^API_ID `\([1-9][0-9]*\)`$/\1/p' docs/api_credentials.md)
+        api_hash=$(sed -n 's/^API_HASH `\([0-9a-fA-F]\{32\}\)`$/\1/p' docs/api_credentials.md)
+        test -n "$api_id"
+        test -n "$api_hash"
+        echo "api-id=$api_id" >> "$GITHUB_OUTPUT"
+        echo "api-hash=$api_hash" >> "$GITHUB_OUTPUT"
+        for tool in docker file readelf ldd strip tar xz sha256sum; do
+          command -v "$tool" > /dev/null
+        done
+    - name: Pull the Linux build image
+      id: image
+      shell: bash
+      env:
+        IMAGE: ghcr.io/telegramdesktop/tdesktop/centos_env:latest
+      run: |
+        set -euo pipefail
+        docker pull "$IMAGE"
+        test "$(docker image inspect --format '{{.Architecture}}' "$IMAGE")" = amd64
+        digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE")
+        test -n "$digest"
+        echo "digest=$digest" >> "$GITHUB_OUTPUT"
+    - name: Build Linux x64 Release
+      shell: bash
+      working-directory: ${{ inputs.repo-name }}
+      env:
+        API_HASH: ${{ steps.config.outputs.api-hash }}
+        API_ID: ${{ steps.config.outputs.api-id }}
+        IMAGE: ghcr.io/telegramdesktop/tdesktop/centos_env:latest
+      run: |
+        set -euo pipefail
+        rm -rf out artifacts
+        ccache_dir="$GITHUB_WORKSPACE/ccache-linux"
+        mkdir -p "$ccache_dir"
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          --volume "$PWD:/usr/src/tdesktop" \
+          --volume "$ccache_dir:/var/cache/ccache" \
+          --env HOME=/tmp \
+          --env CONFIG=Release \
+          --env CMAKE_BUILD_PARALLEL_LEVEL=3 \
+          --env CCACHE_DISABLE=false \
+          --env CCACHE_DIR=/var/cache/ccache \
+          --env CCACHE_BASEDIR=/usr/src/tdesktop \
+          --env CCACHE_MAXSIZE=2G \
+          --env CCACHE_COMPILERCHECK=content \
+          --env CCACHE_SLOPPINESS=pch_defines,time_macros \
+          "$IMAGE" \
+          /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
+          -G Ninja \
+          -D CMAKE_BUILD_TYPE=Release \
+          -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
+          -D "TDESKTOP_API_ID=$API_ID" \
+          -D "TDESKTOP_API_HASH=$API_HASH" \
+          -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON \
+          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+    - name: Verify and package
+      shell: bash
+      working-directory: ${{ inputs.repo-name }}
+      env:
+        BUILD_IMAGE: ${{ steps.image.outputs.digest }}
+        REVISION: ${{ inputs.revision }}
+        SOURCE_DATE_EPOCH: '1'
+        VERSION: ${{ inputs.version }}
+      run: bash .github/scripts/package_linux.sh out/bin/AyuGram "$VERSION" "$REVISION" artifacts "$BUILD_IMAGE"
+    - name: Build statistics
+      if: always()
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ inputs.repo-name }}
+      env:
+        IMAGE: ghcr.io/telegramdesktop/tdesktop/centos_env:latest
+      run: |
+        python3 Telegram/build/ninja_log_stats.py out/.ninja_log \
+          --title 'Linux x64 Release' --markdown-file "$GITHUB_STEP_SUMMARY"
+        {
+          echo
+          echo '<details><summary>Linux compiler cache and disk</summary>'
+          echo
+          echo '```'
+          if docker image inspect "$IMAGE" > /dev/null 2>&1; then
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE/ccache-linux:/var/cache/ccache" \
+              --env CCACHE_DIR=/var/cache/ccache \
+              "$IMAGE" ccache --show-stats -v || true
+          fi
+          echo
+          df -h || true
+          echo '```'
+          echo
+          echo '</details>'
+        } >> "$GITHUB_STEP_SUMMARY"
