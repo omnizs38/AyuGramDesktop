@@ -93,14 +93,18 @@ jobs:
         include:
           - check: source
             index: 0
-          - check: image
+          - check: credentials
             index: 1
-          - check: build
+          - check: tools
             index: 2
-          - check: package
+          - check: image
             index: 3
-          - check: statistics
+          - check: build
             index: 4
+          - check: package
+            index: 5
+          - check: statistics
+            index: 6
     steps:
       - uses: actions/checkout@v7
         with:

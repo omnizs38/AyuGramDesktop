@@ -15,8 +15,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Validate source and public credentials
-      id: config
+    - name: Validate source
       shell: bash
       working-directory: ${{ inputs.repo-name }}
       env:
@@ -33,6 +32,12 @@ runs:
         test "$source_version" = "$EXPECTED_VERSION"
         test "$original_version" = "$EXPECTED_VERSION"
         test ! -d Telegram/Resources/ayu/languages
+    - name: Read public build credentials
+      id: config
+      shell: bash
+      working-directory: ${{ inputs.repo-name }}
+      run: |
+        set -euo pipefail
         api_id=$(sed -n 's/^API_ID `\([1-9][0-9]*\)`$/\1/p' docs/api_credentials.md)
         api_hash=$(sed -n 's/^API_HASH `\([0-9a-fA-F]\{32\}\)`$/\1/p' docs/api_credentials.md)
         test -n "$api_id"
@@ -41,6 +46,9 @@ runs:
           printf 'api-id=%s\n' "$api_id"
           printf 'api-hash=%s\n' "$api_hash"
         } >> "$GITHUB_OUTPUT"
+    - name: Validate host tools
+      shell: bash
+      run: |
         for tool in docker file readelf ldd strip tar xz sha256sum; do
           command -v "$tool" > /dev/null
         done
