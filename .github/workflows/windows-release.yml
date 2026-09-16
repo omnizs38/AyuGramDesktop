@@ -90,15 +90,7 @@ jobs:
     defaults:
       run:
         shell: pwsh
-    env:
-      TDESKTOP_API_ID: ${{ vars.TDESKTOP_API_ID }}
-      TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
     steps:
-      - name: Validate application credentials
-        run: |
-          if ($env:TDESKTOP_API_ID -notmatch '^[1-9][0-9]*$' -or $env:TDESKTOP_API_HASH -notmatch '^[0-9a-fA-F]{32}$') {
-            throw 'Set TDESKTOP_API_ID and TDESKTOP_API_HASH in repository Actions settings.'
-          }
       - name: Prepare directories
         run: |
           $build = Join-Path $env:GITHUB_WORKSPACE 'TBuild'
@@ -109,6 +101,28 @@ jobs:
           submodules: recursive
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
           persist-credentials: false
+      - name: Resolve application credentials
+        id: credentials
+        env:
+          CONFIGURED_API_ID: ${{ vars.TDESKTOP_API_ID }}
+          CONFIGURED_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+        run: |
+          $apiId = $env:CONFIGURED_API_ID
+          $apiHash = $env:CONFIGURED_API_HASH
+          if ($apiId -notmatch '^[1-9][0-9]*$' -or $apiHash -notmatch '^[0-9a-fA-F]{32}$') {
+            $repo = Join-Path $env:TBUILD $env:REPO_NAME
+            $text = Get-Content (Join-Path $repo 'docs\api_credentials.md') -Raw
+            $idMatch = [regex]::Match($text, '(?m)^API_ID\s+`([1-9][0-9]*)`')
+            $hashMatch = [regex]::Match($text, '(?m)^API_HASH\s+`([0-9a-fA-F]{32})`')
+            if (-not $idMatch.Success -or -not $hashMatch.Success) {
+              throw 'Valid application credentials are not configured or documented.'
+            }
+            $apiId = $idMatch.Groups[1].Value
+            $apiHash = $hashMatch.Groups[1].Value
+          }
+          Write-Output "::add-mask::$apiHash"
+          "api-id=$apiId" | Out-File $env:GITHUB_OUTPUT -Append
+          "api-hash=$apiHash" | Out-File $env:GITHUB_OUTPUT -Append
       - name: Prepare libraries
         uses: ./TBuild/AyuGramDesktop/.github/actions/windows-libraries
         with:
@@ -120,8 +134,8 @@ jobs:
           build-root: ${{ env.TBUILD }}
           repo-name: ${{ env.REPO_NAME }}
           revision: ${{ github.sha }}
-          api-id: ${{ vars.TDESKTOP_API_ID }}
-          api-hash: ${{ secrets.TDESKTOP_API_HASH }}
+          api-id: ${{ steps.credentials.outputs.api-id }}
+          api-hash: ${{ steps.credentials.outputs.api-hash }}
           windows-sdk: ${{ env.WINDOWS_SDK }}
       - name: Verify and package Windows artifacts
         run: |

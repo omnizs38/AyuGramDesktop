@@ -26,5 +26,6 @@ both packages, and publishes the exact successful commit.
 
 The automatic release trigger is deliberately limited to
 `release/windows-7.2.8-win11.1`. The workflow can also be started manually from
-that branch. Application credentials must be configured in the repository as
-`TDESKTOP_API_ID` and `TDESKTOP_API_HASH`.
+that branch. Repository credentials `TDESKTOP_API_ID` and
+`TDESKTOP_API_HASH` are preferred. If they are absent, the technical build uses
+the public credentials already documented in `docs/api_credentials.md`.
