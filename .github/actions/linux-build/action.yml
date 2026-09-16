@@ -24,17 +24,23 @@ runs:
         EXPECTED_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        test "$(uname -m)" = x86_64
-        test "$(git rev-parse HEAD)" = "$EXPECTED_REVISION"
-        test "$(awk '$1 == "AppVersionStr" { print $2 }' Telegram/build/version)" = "$EXPECTED_VERSION"
-        test "$(awk '$1 == "AppVersionOriginal" { print $2 }' Telegram/build/version)" = "$EXPECTED_VERSION"
+        runner_architecture=$(uname -m)
+        source_revision=$(git rev-parse HEAD)
+        source_version=$(awk '$1 == "AppVersionStr" { print $2 }' Telegram/build/version)
+        original_version=$(awk '$1 == "AppVersionOriginal" { print $2 }' Telegram/build/version)
+        test "$runner_architecture" = x86_64
+        test "$source_revision" = "$EXPECTED_REVISION"
+        test "$source_version" = "$EXPECTED_VERSION"
+        test "$original_version" = "$EXPECTED_VERSION"
         test ! -d Telegram/Resources/ayu/languages
         api_id=$(sed -n 's/^API_ID `\([1-9][0-9]*\)`$/\1/p' docs/api_credentials.md)
         api_hash=$(sed -n 's/^API_HASH `\([0-9a-fA-F]\{32\}\)`$/\1/p' docs/api_credentials.md)
         test -n "$api_id"
         test -n "$api_hash"
-        echo "api-id=$api_id" >> "$GITHUB_OUTPUT"
-        echo "api-hash=$api_hash" >> "$GITHUB_OUTPUT"
+        {
+          printf 'api-id=%s\n' "$api_id"
+          printf 'api-hash=%s\n' "$api_hash"
+        } >> "$GITHUB_OUTPUT"
         for tool in docker file readelf ldd strip tar xz sha256sum; do
           command -v "$tool" > /dev/null
         done
@@ -46,10 +52,11 @@ runs:
       run: |
         set -euo pipefail
         docker pull "$IMAGE"
-        test "$(docker image inspect --format '{{.Architecture}}' "$IMAGE")" = amd64
+        architecture=$(docker image inspect --format '{{.Architecture}}' "$IMAGE")
         digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE")
+        test "$architecture" = amd64
         test -n "$digest"
-        echo "digest=$digest" >> "$GITHUB_OUTPUT"
+        printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
     - name: Build Linux x64 Release
       shell: bash
       working-directory: ${{ inputs.repo-name }}
