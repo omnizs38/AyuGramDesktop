@@ -1,0 +1,312 @@
+name: Windows 11 release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release/windows-7.2.8-win11.1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REPO_NAME: AyuGramDesktop
+  VERSION: 7.2.8
+  RELEASE_TAG: v7.2.8-win11.1
+  WINDOWS_SDK: 10.0.26100.0
+
+jobs:
+  validate:
+    name: Validate Windows release head
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Match source version and release ref
+        run: |
+          test "$GITHUB_REF" = 'refs/heads/release/windows-7.2.8-win11.1'
+          test "$(awk '$1 == "AppVersionStr" { print $2 }' Telegram/build/version)" = "$VERSION"
+          test "$(awk '$1 == "AppVersionOriginal" { print $2 }' Telegram/build/version)" = "$VERSION"
+          test "$(awk '$1 == "BetaChannel" { print $2 }' Telegram/build/version)" = 0
+          test "$(awk '$1 == "AlphaVersion" { print $2 }' Telegram/build/version)" = 0
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release tag $RELEASE_TAG already exists." >&2
+            exit 1
+          fi
+      - name: Build configuration tests
+        run: python3 -B -m unittest discover -s Telegram/build -p 'test_*.py'
+      - name: Preparation syntax
+        run: python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Telegram/build/prepare/prepare.py").read_text())'
+
+  source:
+    name: Full source archive
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Archive source and pinned submodules
+        run: |
+          root="AyuGramDesktop-$VERSION"
+          archive="$RUNNER_TEMP/$root-full.tar"
+          git archive --format=tar --prefix="$root/" HEAD -o "$archive"
+          while read -r revision path rest; do
+            revision="${revision#[-+U]}"
+            test "$(git -C "$path" rev-parse HEAD)" = "$revision"
+            part="$RUNNER_TEMP/submodule-$(printf '%s' "$path" | sha256sum | cut -c1-16).tar"
+            git -C "$path" archive --format=tar --prefix="$root/$path/" "$revision" -o "$part"
+            tar --concatenate --file="$archive" "$part"
+          done < <(git submodule status --recursive)
+          gzip -9 -n "$archive"
+          mkdir artifacts
+          mv "$archive.gz" "artifacts/AyuGramDesktop-$VERSION-windows-source.tar.gz"
+          tar -tzf "artifacts/AyuGramDesktop-$VERSION-windows-source.tar.gz" > "$RUNNER_TEMP/source-files.txt"
+          grep -qx "$root/Telegram/build/version" "$RUNNER_TEMP/source-files.txt"
+          grep -qx "$root/Telegram/Resources/winrc/Telegram.manifest" "$RUNNER_TEMP/source-files.txt"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-source-${{ github.sha }}
+          path: artifacts/AyuGramDesktop-${{ env.VERSION }}-windows-source.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  windows:
+    name: Windows 11 x64 Setup and Portable
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Prepare directories
+        run: |
+          $build = Join-Path $env:GITHUB_WORKSPACE 'TBuild'
+          New-Item -ItemType Directory -Force (Join-Path $build 'Libraries\win64') | Out-Null
+          "TBUILD=$build" | Out-File $env:GITHUB_ENV -Append
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+          persist-credentials: false
+      - name: Resolve application credentials
+        id: credentials
+        env:
+          CONFIGURED_API_ID: ${{ vars.TDESKTOP_API_ID }}
+          CONFIGURED_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+        run: |
+          $apiId = $env:CONFIGURED_API_ID
+          $apiHash = $env:CONFIGURED_API_HASH
+          if ($apiId -notmatch '^[1-9][0-9]*$' -or $apiHash -notmatch '^[0-9a-fA-F]{32}$') {
+            $repo = Join-Path $env:TBUILD $env:REPO_NAME
+            $text = Get-Content (Join-Path $repo 'docs\api_credentials.md') -Raw
+            $idMatch = [regex]::Match($text, '(?m)^API_ID\s+`([1-9][0-9]*)`')
+            $hashMatch = [regex]::Match($text, '(?m)^API_HASH\s+`([0-9a-fA-F]{32})`')
+            if (-not $idMatch.Success -or -not $hashMatch.Success) {
+              throw 'Valid application credentials are not configured or documented.'
+            }
+            $apiId = $idMatch.Groups[1].Value
+            $apiHash = $hashMatch.Groups[1].Value
+          }
+          Write-Output "::add-mask::$apiHash"
+          "api-id=$apiId" | Out-File $env:GITHUB_OUTPUT -Append
+          "api-hash=$apiHash" | Out-File $env:GITHUB_OUTPUT -Append
+      - name: Prepare libraries
+        uses: ./TBuild/AyuGramDesktop/.github/actions/windows-libraries
+        with:
+          build-root: ${{ env.TBUILD }}
+          repo-name: ${{ env.REPO_NAME }}
+          save-cache: 'true'
+      - name: Compile with Windows 11 SDK
+        uses: ./TBuild/AyuGramDesktop/.github/actions/windows-compile
+        with:
+          build-root: ${{ env.TBUILD }}
+          repo-name: ${{ env.REPO_NAME }}
+          revision: ${{ github.sha }}
+          api-id: ${{ steps.credentials.outputs.api-id }}
+          api-hash: ${{ steps.credentials.outputs.api-hash }}
+          windows-sdk: ${{ env.WINDOWS_SDK }}
+          save-cache: 'true'
+      - name: Verify and package Windows artifacts
+        run: |
+          $repo = Join-Path $env:TBUILD $env:REPO_NAME
+          $out = Join-Path $repo 'out\Release'
+          $binary = Join-Path $out 'AyuGram.exe'
+          if (-not (Test-Path $binary)) { throw 'AyuGram.exe was not built.' }
+          if (Test-Path (Join-Path $out 'Updater.exe')) { throw 'Updater.exe must not be built.' }
+
+          $stream = [IO.File]::OpenRead($binary)
+          try {
+            $reader = [IO.BinaryReader]::new($stream)
+            $stream.Position = 0x3c
+            $pe = $reader.ReadInt32()
+            $stream.Position = $pe + 4
+            $machine = $reader.ReadUInt16()
+          } finally {
+            $stream.Dispose()
+          }
+          if ($machine -ne 0x8664) { throw "Unexpected PE machine: 0x$($machine.ToString('x4'))." }
+          $version = (Get-Item $binary).VersionInfo.ProductVersion
+          if ($version -ne "$env:VERSION.0") { throw "Unexpected product version: $version." }
+          if ((Get-AuthenticodeSignature $binary).Status -ne 'NotSigned') { throw 'Unexpected application signature.' }
+
+          $mt = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\$env:WINDOWS_SDK\x64\mt.exe"
+          if (-not (Test-Path $mt)) { throw "Manifest tool is missing: $mt" }
+          $embeddedManifest = Join-Path $env:RUNNER_TEMP 'AyuGram.manifest'
+          & $mt -nologo "-inputresource:$binary;#1" "-out:$embeddedManifest"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $manifest = Get-Content $embeddedManifest -Raw
+          if ($manifest -notmatch '>PerMonitorV2,PerMonitor<') { throw 'Per-Monitor V2 DPI support is missing.' }
+          if ($manifest -notmatch '<longPathAware[^>]*>true</longPathAware>') { throw 'Long-path awareness is missing.' }
+
+          $d3d = Join-Path $out 'modules\x64\d3d\d3dcompiler_47.dll'
+          if (-not (Test-Path $d3d)) { throw 'D3D compiler module is missing.' }
+          if (-not (Test-Path (Join-Path $repo 'Telegram\Resources\art\icon256.ico'))) { throw 'Windows application icon is missing.' }
+
+          choco install innosetup --version=6.7.1 --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          $setupBase = "AyuGram-$env:VERSION-windows-x64-setup"
+          & $iscc "/dMyAppVersion=$env:VERSION" "/dMyAppVersionZero=$env:VERSION" "/dMyAppVersionFull=$env:VERSION" "/dReleasePath=$out" '/dMyBuildTarget=win64' '/dAyuGramUnsigned=1' '/dAyuGramNoUpdater=1' "/dMyOutputBaseFilename=$setupBase" (Join-Path $repo 'Telegram\build\setup.iss')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $setup = Join-Path $out "$setupBase.exe"
+          if (-not (Test-Path $setup)) { throw 'Installer was not created.' }
+          if ((Get-AuthenticodeSignature $setup).Status -ne 'NotSigned') { throw 'Unexpected installer signature.' }
+
+          $artifacts = Join-Path $repo 'artifacts'
+          New-Item -ItemType Directory -Force $artifacts | Out-Null
+          Copy-Item $setup (Join-Path $artifacts "$setupBase.exe")
+
+          $portableName = "AyuGram-$env:VERSION-windows-x64-portable"
+          $portable = Join-Path $env:RUNNER_TEMP $portableName
+          New-Item -ItemType Directory -Force (Join-Path $portable 'TelegramForcePortable') | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $portable 'modules\x64\d3d') | Out-Null
+          Copy-Item $binary (Join-Path $portable 'AyuGram.exe')
+          Copy-Item $d3d (Join-Path $portable 'modules\x64\d3d\d3dcompiler_47.dll')
+          @(
+            "AyuGram $env:VERSION portable for Windows 10/11 x64"
+            "Source commit: $env:GITHUB_SHA"
+            'Keep TelegramForcePortable next to AyuGram.exe to store the profile in this folder.'
+            'Automatic updates are disabled. This technical build is not Authenticode-signed.'
+          ) | Set-Content (Join-Path $portable 'README.txt') -Encoding utf8NoBOM
+
+          $portableZip = Join-Path $artifacts "$portableName.zip"
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & 7z a -tzip -mx=9 $portableZip $portableName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
+          & 7z t $portableZip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $extract = Join-Path $env:RUNNER_TEMP 'portable-smoke'
+          & 7z x $portableZip "-o$extract" -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $extracted = Join-Path $extract $portableName
+          if (-not (Test-Path (Join-Path $extracted 'AyuGram.exe'))) { throw 'Portable executable is missing.' }
+          if (-not (Test-Path (Join-Path $extracted 'TelegramForcePortable') -PathType Container)) { throw 'Portable profile marker is missing.' }
+          if (-not (Test-Path (Join-Path $extracted 'modules\x64\d3d\d3dcompiler_47.dll'))) { throw 'Portable D3D module is missing.' }
+
+          $install = Join-Path $env:RUNNER_TEMP 'installed-AyuGram'
+          $process = Start-Process (Join-Path $artifacts "$setupBase.exe") -Wait -PassThru -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$install")
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+          if (-not (Test-Path (Join-Path $install 'AyuGram.exe'))) { throw 'Installed application is missing.' }
+          if (Test-Path (Join-Path $install 'Updater.exe')) { throw 'Installer included the updater.' }
+          if (-not (Test-Path (Join-Path $install 'modules\x64\d3d\d3dcompiler_47.dll'))) { throw 'Installer omitted the D3D module.' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-packages-${{ github.sha }}
+          path: |
+            ${{ env.TBUILD }}\${{ env.REPO_NAME }}\artifacts\AyuGram-${{ env.VERSION }}-windows-x64-setup.exe
+            ${{ env.TBUILD }}\${{ env.REPO_NAME }}\artifacts\AyuGram-${{ env.VERSION }}-windows-x64-portable.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    name: Publish Windows GitHub Release
+    needs: [source, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: windows-*-${{ github.sha }}
+          path: release
+          merge-multiple: true
+      - name: Verify files and checksums
+        run: |
+          cd release
+          expected=(
+            "AyuGram-$VERSION-windows-x64-setup.exe"
+            "AyuGram-$VERSION-windows-x64-portable.zip"
+            "AyuGramDesktop-$VERSION-windows-source.tar.gz"
+          )
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 3
+          for file in "${expected[@]}"; do test -s "$file"; done
+          sha256sum "${expected[@]}" > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+      - name: Publish exact-head Windows release
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Technical Windows 11-focused build of AyuGram $VERSION from commit \`$GITHUB_SHA\`.
+
+          New in this package:
+          - Per-Monitor V2 DPI handling with fallback for older Windows versions.
+          - Long-path-aware file access.
+          - Separately smoke-tested Setup and Portable distributions.
+
+          Files:
+          - \`AyuGram-$VERSION-windows-x64-setup.exe\`: per-user Setup package.
+          - \`AyuGram-$VERSION-windows-x64-portable.zip\`: portable package with an isolated profile.
+          - \`AyuGramDesktop-$VERSION-windows-source.tar.gz\`: exact source with pinned submodules.
+
+          Automatic updates are disabled. Windows binaries are not Authenticode-signed.
+          Verify downloads with \`SHA256SUMS.txt\` before use.
+          EOF
+          gh release create "$RELEASE_TAG" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "AyuGram $VERSION for Windows 11" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --latest
+
+  cleanup:
+    name: Remove temporary release artifacts
+    needs: [validate, source, windows, publish]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Delete artifacts from this run
+        run: |
+          set -euo pipefail
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[].id' |
+          while IFS= read -r artifact_id; do
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+          done
