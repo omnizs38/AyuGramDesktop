@@ -9,6 +9,14 @@
 - Report per-target build times and compiler cache statistics in the run
   summary, and lint the composite actions in `Source checks`.
 
+## 7.2.8 Windows 11 package 1 - 2026-09-16
+
+- Build the Windows x64 application with Windows 11 SDK 10.0.26100.0.
+- Enable Per-Monitor V2 DPI behavior and long-path-aware file access while
+  retaining Windows 10 compatibility.
+- Publish separately named Setup and Portable packages, verify both package
+  layouts, and include SHA-256 checksums and the full pinned source archive.
+
 ## 7.2.8 - 2026-09-15
 
 - Updated the application base to Telegram Desktop 7.2.8, which fixes crashes

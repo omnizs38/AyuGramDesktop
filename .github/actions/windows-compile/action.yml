@@ -17,6 +17,9 @@ inputs:
   api-hash:
     description: Telegram application hash.
     required: true
+  windows-sdk:
+    description: Windows SDK used to target Windows 11 while retaining Windows 10 compatibility.
+    default: '10.0.26100.0'
   save-cache:
     description: Save the compiler cache back. Only the warming workflow owns the cached entries.
     default: 'false'
@@ -30,6 +33,18 @@ runs:
         choco install ccache --version=4.14.0 --no-progress -y
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         ccache --version
+    - name: Validate Windows SDK
+      shell: pwsh
+      env:
+        WINDOWS_SDK: ${{ inputs.windows-sdk }}
+      run: |
+        if ($env:WINDOWS_SDK -notmatch '^10\.0\.[0-9]+\.0$') {
+          throw "Unexpected Windows SDK version: $env:WINDOWS_SDK"
+        }
+        $sdk = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Include\$env:WINDOWS_SDK"
+        if (-not (Test-Path $sdk)) {
+          throw "Windows SDK $env:WINDOWS_SDK is not installed at $sdk."
+        }
     - name: Compiler cache key
       id: cache-key
       shell: bash
@@ -58,6 +73,7 @@ runs:
         REPO: ${{ inputs.repo-name }}
         API_ID: ${{ inputs.api-id }}
         API_HASH: ${{ inputs.api-hash }}
+        WINDOWS_SDK: ${{ inputs.windows-sdk }}
         CCACHE_DIR: ${{ inputs.build-root }}\ccache
         CCACHE_DEPEND: 'true'
         CCACHE_MAXSIZE: 2G
@@ -68,6 +84,7 @@ runs:
         call configure.bat -G "Ninja Multi-Config" ^
           -D CMAKE_CONFIGURATION_TYPES=Release ^
           -D CMAKE_EXPORT_COMPILE_COMMANDS=ON ^
+          -D CMAKE_SYSTEM_VERSION=%WINDOWS_SDK% ^
           "-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=" ^
           -D CMAKE_C_COMPILER_LAUNCHER=ccache ^
           -D CMAKE_CXX_COMPILER_LAUNCHER=ccache ^
@@ -80,6 +97,7 @@ runs:
       env:
         BUILD_ROOT: ${{ inputs.build-root }}
         REPO: ${{ inputs.repo-name }}
+        WINDOWS_SDK: ${{ inputs.windows-sdk }}
       run: |
         $out = Join-Path $env:BUILD_ROOT "$env:REPO\out"
         $cache = @{}
@@ -87,6 +105,9 @@ runs:
           if ($_ -match '^([^:#/][^:=]*):[^=]+=(.*)$') { $cache[$Matches[1]] = $Matches[2] }
         }
         if ($cache['CMAKE_CONFIGURATION_TYPES'] -ne 'Release') { throw 'Not a Release-only build.' }
+        if ($cache['CMAKE_SYSTEM_VERSION'] -ne $env:WINDOWS_SDK) {
+          throw "Unexpected Windows SDK in CMake cache: $($cache['CMAKE_SYSTEM_VERSION'])"
+        }
         if ($cache['DESKTOP_APP_DISABLE_AUTOUPDATE'] -ne 'ON') { throw 'Updater is enabled.' }
         if ($cache['CMAKE_C_COMPILER_LAUNCHER'] -ne 'ccache' -or $cache['CMAKE_CXX_COMPILER_LAUNCHER'] -ne 'ccache') {
           throw 'Compiler cache is not wired into the build.'
