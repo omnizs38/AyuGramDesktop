@@ -1,0 +1,54 @@
+name: Linux x64 package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REPO_NAME: AyuGramDesktop
+  VERSION: 7.2.8
+
+jobs:
+  linux:
+    name: Linux x64 Release package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Reclaim build disk space
+        run: |
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          docker system prune --all --force
+          df -h /
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          path: ${{ env.REPO_NAME }}
+          persist-credentials: false
+      - name: Build, verify and package
+        uses: ./AyuGramDesktop/.github/actions/linux-build
+        with:
+          repo-name: ${{ env.REPO_NAME }}
+          version: ${{ env.VERSION }}
+          revision: ${{ github.sha }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x64-${{ github.sha }}
+          path: |
+            ${{ env.REPO_NAME }}/artifacts/AyuGram-${{ env.VERSION }}-linux-x64.tar.xz
+            ${{ env.REPO_NAME }}/artifacts/SHA256SUMS.txt
+            ${{ env.REPO_NAME }}/artifacts/runtime-dependencies.txt
+            ${{ env.REPO_NAME }}/artifacts/build-metadata.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
