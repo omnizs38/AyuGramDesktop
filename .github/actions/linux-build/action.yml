@@ -38,10 +38,10 @@ runs:
       working-directory: ${{ inputs.repo-name }}
       run: |
         set -euo pipefail
-        api_id=$(sed -n 's/^API_ID `\([1-9][0-9]*\)`$/\1/p' docs/api_credentials.md)
-        api_hash=$(sed -n 's/^API_HASH `\([0-9a-fA-F]\{32\}\)`$/\1/p' docs/api_credentials.md)
-        test -n "$api_id"
-        test -n "$api_hash"
+        api_id=$(awk '$1 == "API_ID" { gsub(/`/, "", $2); print $2; exit }' docs/api_credentials.md)
+        api_hash=$(awk '$1 == "API_HASH" { gsub(/`/, "", $2); print $2; exit }' docs/api_credentials.md)
+        [[ $api_id =~ ^[1-9][0-9]*$ ]]
+        [[ $api_hash =~ ^[0-9a-fA-F]{32}$ ]]
         {
           printf 'api-id=%s\n' "$api_id"
           printf 'api-hash=%s\n' "$api_hash"
