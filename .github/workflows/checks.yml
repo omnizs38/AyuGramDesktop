@@ -83,6 +83,49 @@ jobs:
           pip install --quiet --disable-pip-version-check pyyaml
           python3 .github/lint_actions.py
 
+  linux-action-shell:
+    name: Linux action shell (${{ matrix.check }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: source
+            index: 0
+          - check: image
+            index: 1
+          - check: build
+            index: 2
+          - check: package
+            index: 3
+          - check: statistics
+            index: 4
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Extract and lint action step
+        env:
+          STEP_INDEX: ${{ matrix.index }}
+        run: |
+          pip install --quiet --disable-pip-version-check pyyaml
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+          import yaml
+
+          action = yaml.safe_load(pathlib.Path('.github/actions/linux-build/action.yml').read_text())
+          script = action['runs']['steps'][int(os.environ['STEP_INDEX'])]['run']
+          script = re.sub(r'\$\{\{.*?\}\}', 'expression', script, flags=re.DOTALL)
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'linux-action-step.sh').write_text(script)
+          PY
+          shellcheck "$RUNNER_TEMP/linux-action-step.sh"
+
   linux-package:
     name: Linux package contract
     runs-on: ubuntu-24.04
