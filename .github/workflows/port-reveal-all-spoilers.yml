@@ -1,0 +1,380 @@
+name: Port Reveal All Spoilers to Telegram 7.2.8
+
+on:
+  push:
+    branches:
+      - work/privacy-feature-pack
+    paths:
+      - .github/workflows/port-reveal-all-spoilers.yml
+
+permissions:
+  contents: write
+
+jobs:
+  port:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/privacy-feature-pack
+          fetch-depth: 0
+      - name: Apply pinned Reveal All Spoilers port
+        shell: bash
+        run: |
+          set -uo pipefail
+          branch='work/privacy-feature-pack'
+          base='62e507ac5f544e3f728e1a65023d79765cbda3a1'
+          libui='07c7d6b5d1ee87ab47cca10fa4542dd21b26737a'
+          start="$(git rev-parse HEAD)"
+          log=/tmp/port.log
+
+          set +e
+          (
+            set -euo pipefail
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git reset --mixed "$base"
+            rm -f .github/workflows/port-reveal-all-spoilers.yml
+
+            python3 - <<'PY'
+          from pathlib import Path
+
+          def read(path):
+              return Path(path).read_text()
+
+          def write(path, text):
+              Path(path).write_text(text)
+
+          def replace_once(path, old, new, label):
+              text = read(path)
+              if new in text:
+                  return
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected one match, found {count} in {path}")
+              write(path, text.replace(old, new, 1))
+
+          def ensure_include(path, anchor, include):
+              text = read(path)
+              line = include + "\n"
+              if line in text:
+                  return
+              needle = anchor + "\n"
+              if text.count(needle) != 1:
+                  raise RuntimeError(f"include anchor {anchor}: expected one match in {path}")
+              write(path, text.replace(needle, needle + line, 1))
+
+          # Language strings.
+          path = "Telegram/Resources/langs/lang.strings"
+          text = read(path)
+          entries = [
+              '"ayu_RevealAllSpoilers" = "Reveal All Spoilers";',
+              '"ayu_RevealAllSpoilersDescription" = "Automatically reveal all image, video, and text spoilers.";',
+          ]
+          for entry in entries:
+              if entry not in text:
+                  if text and not text.endswith("\n"):
+                      text += "\n"
+                  text += entry + "\n"
+          write(path, text)
+
+          # Point the 7.2.8-compatible submodule at the fork carrying the exact lib_ui port.
+          replace_once(
+              ".gitmodules",
+              "\turl = https://github.com/oviron/lib_ui.git",
+              "\turl = https://github.com/omnizs38/lib_ui.git",
+              "lib_ui submodule URL",
+          )
+
+          path = "Telegram/SourceFiles/ayu/ayu_infra.cpp"
+          ensure_include(path, '#include "ui/chat/chat_style_radius.h"', '#include "ui/text/text.h"')
+          replace_once(
+              path,
+              "\tUi::SetAppliedBubbleRadius(settings.messageBubbleRadius());\n",
+              "\tUi::SetAppliedBubbleRadius(settings.messageBubbleRadius());\n\n"
+              "\tUi::Text::RevealAllSpoilersCallback = [] {\n"
+              "\t\treturn AyuSettings::getInstance().revealAllSpoilers();\n"
+              "\t};\n",
+              "install reveal callback",
+          )
+
+          path = "Telegram/SourceFiles/ayu/ayu_settings.cpp"
+          replace_once(
+              path,
+              "void AyuSettings::setSingleCornerRadius(bool val) {\n"
+              "\tif (_singleCornerRadius.current() == val) return;\n"
+              "\t_singleCornerRadius = val;\n"
+              "\trepaintApp();\n"
+              "\tsave();\n"
+              "}\n",
+              "void AyuSettings::setSingleCornerRadius(bool val) {\n"
+              "\tif (_singleCornerRadius.current() == val) return;\n"
+              "\t_singleCornerRadius = val;\n"
+              "\trepaintApp();\n"
+              "\tsave();\n"
+              "}\n\n"
+              "void AyuSettings::setRevealAllSpoilers(bool val) {\n"
+              "\tif (_revealAllSpoilers.current() == val) return;\n"
+              "\t_revealAllSpoilers = val;\n"
+              "\trepaintApp();\n"
+              "\tsave();\n"
+              "}\n",
+              "reveal setting setter",
+          )
+          replace_once(
+              path,
+              '\t\t{"singleCornerRadius", s._singleCornerRadius.current()},\n',
+              '\t\t{"singleCornerRadius", s._singleCornerRadius.current()},\n'
+              '\t\t{"revealAllSpoilers", s._revealAllSpoilers.current()},\n',
+              "serialize reveal setting",
+          )
+          replace_once(
+              path,
+              '\ts._singleCornerRadius = j.value("singleCornerRadius", defaults._singleCornerRadius.current());\n',
+              '\ts._singleCornerRadius = j.value("singleCornerRadius", defaults._singleCornerRadius.current());\n'
+              '\ts._revealAllSpoilers = (j.contains("revealAllSpoilers") && j["revealAllSpoilers"].is_boolean())\n'
+              '\t\t? j["revealAllSpoilers"].get<bool>()\n'
+              '\t\t: defaults._revealAllSpoilers.current();\n',
+              "deserialize reveal setting",
+          )
+
+          path = "Telegram/SourceFiles/ayu/ayu_settings.h"
+          replace_once(
+              path,
+              "\t[[nodiscard]] bool singleCornerRadius() const { return _singleCornerRadius.current(); }\n",
+              "\t[[nodiscard]] bool singleCornerRadius() const { return _singleCornerRadius.current(); }\n"
+              "\t[[nodiscard]] bool revealAllSpoilers() const { return _revealAllSpoilers.current(); }\n",
+              "reveal getter",
+          )
+          replace_once(
+              path,
+              "\tvoid setSingleCornerRadius(bool val);\n",
+              "\tvoid setSingleCornerRadius(bool val);\n"
+              "\tvoid setRevealAllSpoilers(bool val);\n",
+              "reveal setter declaration",
+          )
+          replace_once(
+              path,
+              "\t[[nodiscard]] rpl::producer<bool> singleCornerRadiusChanges() const { return _singleCornerRadius.changes(); }\n",
+              "\t[[nodiscard]] rpl::producer<bool> singleCornerRadiusChanges() const { return _singleCornerRadius.changes(); }\n"
+              "\t[[nodiscard]] rpl::producer<bool> revealAllSpoilersValue() const { return _revealAllSpoilers.value(); }\n"
+              "\t[[nodiscard]] rpl::producer<bool> revealAllSpoilersChanges() const { return _revealAllSpoilers.changes(); }\n",
+              "reveal producers",
+          )
+          replace_once(
+              path,
+              "\trpl::variable<bool> _singleCornerRadius = false;\n",
+              "\trpl::variable<bool> _singleCornerRadius = false;\n"
+              "\trpl::variable<bool> _revealAllSpoilers = false;\n",
+              "safe reveal default",
+          )
+
+          path = "Telegram/SourceFiles/ayu/ui/settings/settings_chats.cpp"
+          replace_once(
+              path,
+              "\t\t.setter = &AyuSettings::setReplaceBottomInfoWithIcons,\n"
+              "\t});\n",
+              "\t\t.setter = &AyuSettings::setReplaceBottomInfoWithIcons,\n"
+              "\t});\n\n"
+              "\tayu.addSettingToggle({\n"
+              "\t\t.id = u\"ayu/revealAllSpoilers\"_q,\n"
+              "\t\t.title = tr::ayu_RevealAllSpoilers(),\n"
+              "\t\t.getter = &AyuSettings::revealAllSpoilers,\n"
+              "\t\t.setter = &AyuSettings::setRevealAllSpoilers,\n"
+              "\t});\n",
+              "reveal toggle",
+          )
+
+          path = "Telegram/SourceFiles/data/data_reply_preview.cpp"
+          ensure_include(path, '#include "data/data_reply_preview.h"', '#include "ayu/ayu_settings.h"')
+          replace_once(
+              path,
+              "\t\tbool spoiler) {\n"
+              "\tauto &image = spoiler ? _spoilered : _regular;\n",
+              "\t\tbool spoiler) {\n"
+              "\tif (AyuSettings::getInstance().revealAllSpoilers()) {\n"
+              "\t\tspoiler = false;\n"
+              "\t}\n"
+              "\tauto &image = spoiler ? _spoilered : _regular;\n",
+              "reply preview image",
+          )
+          replace_once(
+              path,
+              "bool ReplyPreview::loaded(bool spoiler) const {\n"
+              "\treturn spoiler ? _checkedSpoilered : _checkedRegular;\n",
+              "bool ReplyPreview::loaded(bool spoiler) const {\n"
+              "\tif (AyuSettings::getInstance().revealAllSpoilers()) {\n"
+              "\t\tspoiler = false;\n"
+              "\t}\n"
+              "\treturn spoiler ? _checkedSpoilered : _checkedRegular;\n",
+              "reply preview loaded",
+          )
+
+          replace_once(
+              "Telegram/SourceFiles/history/view/controls/history_view_compose_controls.cpp",
+              "\t\tif (_shownPreviewSpoiler) {\n",
+              "\t\tif (_shownPreviewSpoiler && !AyuSettings::getInstance().revealAllSpoilers()) {\n",
+              "compose spoiler",
+          )
+
+          path = "Telegram/SourceFiles/history/view/controls/history_view_forward_panel.cpp"
+          ensure_include(path, '#include "apiwrap.h"', '#include "ayu/ayu_settings.h"')
+          replace_once(
+              path,
+              "\t\tif (_spoiler) {\n",
+              "\t\tif (_spoiler && !AyuSettings::getInstance().revealAllSpoilers()) {\n",
+              "forward spoiler",
+          )
+
+          path = "Telegram/SourceFiles/history/view/history_view_reply.cpp"
+          ensure_include(path, '#include "history/view/history_view_reply.h"', '#include "ayu/ayu_settings.h"')
+          replace_once(
+              path,
+              "\t\t\t\t\tp.drawPixmap(to.x(), to.y(), preview);\n"
+              "\t\t\t\t\tif (_spoiler) {\n",
+              "\t\t\t\t\tp.drawPixmap(to.x(), to.y(), preview);\n"
+              "\t\t\t\t\tif (_spoiler && !AyuSettings::getInstance().revealAllSpoilers()) {\n",
+              "reply spoiler",
+          )
+
+          path = "Telegram/SourceFiles/history/view/media/history_view_gif.cpp"
+          ensure_include(path, '#include "history/view/media/history_view_media_spoiler.h"', '#include "ayu/ayu_settings.h"')
+          replace_once(
+              path,
+              "\t\t: (!isRound && _spoiler)\n",
+              "\t\t: (!isRound && _spoiler && !AyuSettings::getInstance().revealAllSpoilers())\n",
+              "gif draw spoiler",
+          )
+          replace_once(
+              path,
+              "\t\tif (_spoiler && !_spoiler->revealed) {\n",
+              "\t\tif (_spoiler && !_spoiler->revealed && !AyuSettings::getInstance().revealAllSpoilers()) {\n",
+              "gif text state",
+          )
+          replace_once(
+              path,
+              "\tconst auto revealed = _spoiler\n",
+              "\tconst auto revealed = (_spoiler && !AyuSettings::getInstance().revealAllSpoilers())\n",
+              "gif grouped draw",
+          )
+          replace_once(
+              path,
+              "\tauto link = (_spoiler && !_spoiler->revealed)\n",
+              "\tauto link = (_spoiler && !_spoiler->revealed && !AyuSettings::getInstance().revealAllSpoilers())\n",
+              "gif grouped state",
+          )
+
+          path = "Telegram/SourceFiles/history/view/media/history_view_media.cpp"
+          ensure_include(path, '#include "styles/style_chat_helpers.h"', '#include "ayu/ayu_settings.h"')
+          replace_once(
+              path,
+              "\t\tconst PaintContext &context) const {\n"
+              "\tif (!spoiler->animation) {\n",
+              "\t\tconst PaintContext &context) const {\n"
+              "\tif (AyuSettings::getInstance().revealAllSpoilers()) {\n"
+              "\t\treturn;\n"
+              "\t}\n"
+              "\tif (!spoiler->animation) {\n",
+              "media spoiler fill",
+          )
+
+          path = "Telegram/SourceFiles/history/view/media/history_view_media_grouped.cpp"
+          ensure_include(path, '#include "history/view/media/history_view_media_grouped.h"', '#include "ayu/ayu_settings.h"')
+          replace_once(
+              path,
+              "Media *GroupedMedia::lookupSpoilerTagMedia() const {\n"
+              "\tif (_parts.empty()) {\n",
+              "Media *GroupedMedia::lookupSpoilerTagMedia() const {\n"
+              "\tif (AyuSettings::getInstance().revealAllSpoilers()) {\n"
+              "\t\treturn nullptr;\n"
+              "\t}\n"
+              "\tif (_parts.empty()) {\n",
+              "grouped media spoiler tag",
+          )
+
+          path = "Telegram/SourceFiles/history/view/media/history_view_photo.cpp"
+          ensure_include(path, '#include "history/view/media/history_view_photo.h"', '#include "ayu/ayu_settings.h"')
+          replace_once(
+              path,
+              "\t\tconst auto revealed = _spoiler\n",
+              "\t\tconst auto revealed = (_spoiler && !AyuSettings::getInstance().revealAllSpoilers())\n",
+              "photo draw spoiler",
+          )
+          replace_once(
+              path,
+              "\t\t\tresult.link = (_spoiler && !_spoiler->revealed)\n",
+              "\t\t\tresult.link = (_spoiler && !_spoiler->revealed && !AyuSettings::getInstance().revealAllSpoilers())\n",
+              "photo text state",
+          )
+          replace_once(
+              path,
+              "\tconst auto revealed = _spoiler\n",
+              "\tconst auto revealed = (_spoiler && !AyuSettings::getInstance().revealAllSpoilers())\n",
+              "photo grouped draw",
+          )
+          replace_once(
+              path,
+              "\tauto link = (_spoiler && !_spoiler->revealed)\n",
+              "\tauto link = (_spoiler && !_spoiler->revealed && !AyuSettings::getInstance().revealAllSpoilers())\n",
+              "photo grouped state",
+          )
+
+          path = "Telegram/SourceFiles/window/notifications_manager_default.cpp"
+          replace_once(
+              path,
+              "\t\t.elisionLines = 1,\n",
+              "\t\t.elisionLines = 1,\n"
+              "\t\t.disableRevealAllSpoilers = true,\n",
+              "notification title privacy",
+          )
+          replace_once(
+              path,
+              "\t\t.elisionHeight = _textRect.height(),\n",
+              "\t\t.elisionHeight = _textRect.height(),\n"
+              "\t\t.disableRevealAllSpoilers = true,\n",
+              "notification text privacy",
+          )
+          PY
+
+            files=(
+              .gitmodules
+              Telegram/Resources/langs/lang.strings
+              Telegram/SourceFiles/ayu/ayu_infra.cpp
+              Telegram/SourceFiles/ayu/ayu_settings.cpp
+              Telegram/SourceFiles/ayu/ayu_settings.h
+              Telegram/SourceFiles/ayu/ui/settings/settings_chats.cpp
+              Telegram/SourceFiles/data/data_reply_preview.cpp
+              Telegram/SourceFiles/history/view/controls/history_view_compose_controls.cpp
+              Telegram/SourceFiles/history/view/controls/history_view_forward_panel.cpp
+              Telegram/SourceFiles/history/view/history_view_reply.cpp
+              Telegram/SourceFiles/history/view/media/history_view_gif.cpp
+              Telegram/SourceFiles/history/view/media/history_view_media.cpp
+              Telegram/SourceFiles/history/view/media/history_view_media_grouped.cpp
+              Telegram/SourceFiles/history/view/media/history_view_photo.cpp
+              Telegram/SourceFiles/window/notifications_manager_default.cpp
+            )
+            git add "${files[@]}"
+            git update-index --add --cacheinfo "160000,$libui,Telegram/lib_ui"
+
+            expected="$(printf '%s\n' "${files[@]}" Telegram/lib_ui | sort)"
+            actual="$(git diff --cached --name-only | sort)"
+            [ "$actual" = "$expected" ] || {
+              printf 'Unexpected changed files.\nExpected:\n%s\nActual:\n%s\n' "$expected" "$actual"
+              exit 1
+            }
+            grep -Fq 'rpl::variable<bool> _revealAllSpoilers = false;' Telegram/SourceFiles/ayu/ayu_settings.h
+            git diff --cached --check
+            git commit -m 'feat: port Reveal All Spoilers to Telegram 7.2.8'
+            git push --force-with-lease="refs/heads/$branch:$start" origin "HEAD:$branch"
+          ) >"$log" 2>&1
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            git reset --hard "$start"
+            cp "$log" PORT_FAILURES.txt
+            git add PORT_FAILURES.txt
+            git commit -m 'chore: capture spoiler port failure'
+            git push origin "HEAD:$branch"
+            exit "$status"
+          fi
