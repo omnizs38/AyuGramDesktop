@@ -124,7 +124,7 @@ jobs:
           script = re.sub(r'\$\{\{.*?\}\}', 'expression', script, flags=re.DOTALL)
           pathlib.Path(os.environ['RUNNER_TEMP'], 'linux-action-step.sh').write_text(script)
           PY
-          shellcheck "$RUNNER_TEMP/linux-action-step.sh"
+          shellcheck --shell=bash "$RUNNER_TEMP/linux-action-step.sh"
 
   linux-package:
     name: Linux package contract
