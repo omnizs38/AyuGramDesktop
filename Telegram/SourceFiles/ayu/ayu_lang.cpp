@@ -17,6 +17,8 @@
 #include <QSaveFile>
 #include <QRegularExpression>
 #include <QtNetwork/QNetworkProxy>
+#include <QtNetwork/QNetworkRequest>
+
 #include <algorithm>
 
 // hard-coded languages
@@ -59,6 +61,10 @@ AyuLanguage *AyuLanguage::currentInstance() {
 
 namespace {
 
+constexpr auto kMaxLanguageBytes = 2 * 1024 * 1024;
+constexpr auto kMaxLanguageEntries = 20000;
+constexpr auto kMaxLanguageValueSize = 64 * 1024;
+
 QString NormalizeLanguage(QString id) {
 	id = id.toLower();
 	if (langMapping.contains(id)) id = langMapping[id];
@@ -67,11 +73,20 @@ QString NormalizeLanguage(QString id) {
 }
 
 bool ValidLanguage(const QJsonDocument &doc) {
-	if (!doc.isObject() || doc.object().isEmpty()) return false;
+	if (!doc.isObject() || doc.object().isEmpty()) {
+		return false;
+	}
 	const auto object = doc.object();
-	return std::all_of(object.begin(), object.end(), [](const QJsonValue &value) {
-		return value.isString();
-	});
+	if (object.size() > kMaxLanguageEntries) {
+		return false;
+	}
+	return std::all_of(
+		object.begin(),
+		object.end(),
+		[](const QJsonValue &value) {
+			return value.isString()
+				&& value.toString().size() <= kMaxLanguageValueSize;
+		});
 }
 
 } // namespace
@@ -116,8 +131,16 @@ void AyuLanguage::loadCachedLanguage() {
 	for (const auto &id : { _currentLangId, _baseLangId }) {
 		if (id.isEmpty()) continue;
 		QFile file(getCachePath(id));
-		if (!file.open(QIODevice::ReadOnly)) continue;
-		const auto doc = QJsonDocument::fromJson(file.readAll());
+		if (!file.open(QIODevice::ReadOnly)
+			|| file.size() < 0
+			|| file.size() > kMaxLanguageBytes) {
+			continue;
+		}
+		const auto data = file.read(kMaxLanguageBytes + 1);
+		if (data.size() > kMaxLanguageBytes) {
+			continue;
+		}
+		const auto doc = QJsonDocument::fromJson(data);
 		if (!ValidLanguage(doc)) continue;
 		_document = doc;
 		LOG(("Loading AyuGram language: %1").arg(id));
@@ -127,6 +150,9 @@ void AyuLanguage::loadCachedLanguage() {
 }
 
 void AyuLanguage::saveCachedLanguage(const QByteArray &json, const QString &langId) {
+	if (json.isEmpty() || json.size() > kMaxLanguageBytes) {
+		return;
+	}
 	QDir().mkpath(getCacheDir());
 	QSaveFile file(getCachePath(langId));
 	if (file.open(QIODevice::WriteOnly)
@@ -149,16 +175,33 @@ void AyuLanguage::fetchLanguage(const QString &id, bool mirror) {
 		? u"https://raw.githubusercontent.com/AyuGram/Languages/l10n_main/values/langs/%1/Shared.json"_q
 		: u"https://cdn.jsdelivr.net/gh/AyuGram/Languages@l10n_main/values/langs/%1/Shared.json"_q).arg(id);
 	auto request = QNetworkRequest(QUrl(url));
+	request.setAttribute(
+		QNetworkRequest::RedirectPolicyAttribute,
+		QNetworkRequest::NoLessSafeRedirectPolicy);
 	request.setTransferTimeout(10000);
 	const auto reply = networkManager.get(request);
 	_chkReply = reply;
+	connect(reply, &QNetworkReply::downloadProgress, this, [=](
+			qint64 received,
+			qint64 total) {
+		if (received > kMaxLanguageBytes || total > kMaxLanguageBytes) {
+			reply->abort();
+		}
+	});
 	connect(reply, &QNetworkReply::finished, this, [=] {
 		reply->deleteLater();
 		if (_chkReply != reply) return;
 		_chkReply = nullptr;
 		const auto data = reply->readAll();
-		const auto doc = QJsonDocument::fromJson(data);
-		if (reply->error() == QNetworkReply::NoError && ValidLanguage(doc)) {
+		const auto status = reply->attribute(
+			QNetworkRequest::HttpStatusCodeAttribute).toInt();
+		const auto doc = (data.size() <= kMaxLanguageBytes)
+			? QJsonDocument::fromJson(data)
+			: QJsonDocument();
+		if (reply->error() == QNetworkReply::NoError
+			&& status >= 200
+			&& status < 300
+			&& ValidLanguage(doc)) {
 			saveCachedLanguage(data, id);
 			_document = doc;
 			applyLanguageJson(doc);

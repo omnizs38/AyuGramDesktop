@@ -38,9 +38,12 @@
 #include <QByteArray>
 #include <QClipboard>
 #include <QGuiApplication>
+#include <QHostAddress>
 #include <QJsonArray>
 #include <qjsondocument.h>
+#include <QRegularExpression>
 #include <QString>
+#include <QUrl>
 #include <thread>
 #include <vector>
 #include <QtNetwork/QHttpPart>
@@ -48,6 +51,26 @@
 #include <QtNetwork/QNetworkReply>
 
 constexpr auto BACKUP_VERSION = 2;
+constexpr auto kMaxFilterImportSize = 1024 * 1024;
+constexpr auto kMaxFilterPatternSize = 4096;
+constexpr auto kMaxImportedFilters = 1000;
+
+bool IsSafeRemoteUrl(const QUrl &url) {
+	if (!url.isValid()
+		|| url.scheme().compare(u"https"_q, Qt::CaseInsensitive) != 0
+		|| !url.userInfo().isEmpty()) {
+		return false;
+	}
+	const auto host = url.host().toLower();
+	if (host.isEmpty()
+		|| host == u"localhost"_q
+		|| host.endsWith(u".localhost"_q)
+		|| host.endsWith(u".local"_q)) {
+		return false;
+	}
+	auto address = QHostAddress();
+	return !address.setAddress(host);
+}
 
 enum class PeerResolveHintType {
 	Username,
@@ -291,54 +314,69 @@ void ResolveFilterBackupPeers(const std::vector<QString> &peerHints) {
 }
 
 void FilterUtils::importFromLink(const QString &link) {
-	if (link.isEmpty()) {
+	const auto url = QUrl(link, QUrl::StrictMode);
+	if (!IsSafeRemoteUrl(url)) {
+		LOG(("FilterUtils: rejected unsafe import URL"));
 		Ui::Toast::Show(tr::ayu_FiltersToastFailFetch(tr::now));
 		return;
 	}
 
-	const auto request = QNetworkRequest(QUrl(link));
+	auto request = QNetworkRequest(url);
+	request.setAttribute(
+		QNetworkRequest::RedirectPolicyAttribute,
+		QNetworkRequest::NoLessSafeRedirectPolicy);
+	request.setTransferTimeout(15000);
 	const auto reply = _manager->get(request);
-	const auto failed = std::make_shared<bool>(false);
+	const auto rejected = std::make_shared<bool>(false);
 
+	connect(
+		reply,
+		&QNetworkReply::downloadProgress,
+		this,
+		[=](qint64 received, qint64 total) {
+			if (received > kMaxFilterImportSize
+				|| total > kMaxFilterImportSize) {
+				*rejected = true;
+				reply->abort();
+			}
+		});
+	connect(
+		reply,
+		&QNetworkReply::redirected,
+		this,
+		[=](const QUrl &redirect) {
+			const auto target = reply->url().resolved(redirect);
+			if (!IsSafeRemoteUrl(target)) {
+				*rejected = true;
+				reply->abort();
+			}
+		});
 	connect(
 		reply,
 		&QNetworkReply::finished,
 		this,
-		[=]
-		{
-			if (*failed) {
+		[=] {
+			const auto status = reply->attribute(
+				QNetworkRequest::HttpStatusCodeAttribute).toInt();
+			if (*rejected
+				|| reply->error() != QNetworkReply::NoError
+				|| status < 200
+				|| status >= 300) {
+				gotFailure(reply->error());
 				reply->deleteLater();
 				return;
 			}
 
 			const auto responseData = reply->readAll();
-
-			const auto jsonString = QString::fromUtf8(responseData);
-
-			if (jsonString.isNull()) {
-				LOG(("FilterUtils: Invalid response."));
+			reply->deleteLater();
+			if (responseData.isEmpty()
+				|| responseData.size() > kMaxFilterImportSize) {
+				LOG(("FilterUtils: invalid import response size: %1")
+					.arg(responseData.size()));
 				Ui::Toast::Show(tr::ayu_FiltersToastFailImport(tr::now));
-
-				reply->deleteLater();
 				return;
 			}
-
-			handleResponse(jsonString.toUtf8());
-			reply->deleteLater();
-		});
-
-	connect(
-		reply,
-		&QNetworkReply::errorOccurred,
-		this,
-		[=](QNetworkReply::NetworkError e)
-		{
-			if (*failed) {
-				return;
-			}
-			*failed = true;
-			gotFailure(e);
-			reply->deleteLater();
+			handleResponse(responseData);
 		});
 }
 
@@ -377,8 +415,13 @@ void FilterUtils::publishFilters() {
 			const auto error = reply->error();
 			const auto location = reply->header(QNetworkRequest::LocationHeader);
 
-			if (error == QNetworkReply::NoError && location.isValid()) {
-				auto url = location.toString();
+			const auto locationUrl = reply->url().resolved(location.toUrl());
+			const auto locationHost = locationUrl.host().toLower();
+			if (error == QNetworkReply::NoError
+				&& IsSafeRemoteUrl(locationUrl)
+				&& (locationHost == u"dpaste.com"_q
+					|| locationHost.endsWith(u".dpaste.com"_q))) {
+				auto url = locationUrl.toString();
 				url.append(".txt");
 				QGuiApplication::clipboard()->setText(url);
 
@@ -393,6 +436,11 @@ void FilterUtils::publishFilters() {
 }
 
 void FilterUtils::importFromJson(const QByteArray &json) {
+	if (json.isEmpty() || json.size() > kMaxFilterImportSize) {
+		LOG(("FilterUtils: rejected import size: %1").arg(json.size()));
+		Ui::Toast::Show(tr::ayu_FiltersToastFailImport(tr::now));
+		return;
+	}
 	auto error = QJsonParseError{0, QJsonParseError::NoError};
 	const auto document = QJsonDocument::fromJson(json, &error);
 
@@ -497,7 +545,6 @@ QString FilterUtils::exportFilters() {
 
 	const auto excl = AyuDatabase::getAllFiltersExclusions();
 
-
 	std::vector<BackupExclusion> exclusions;
 	exclusions.reserve(excl.size());
 
@@ -523,7 +570,6 @@ QString FilterUtils::exportFilters() {
 		}
 	}
 	jsonObject["peers"] = peers;
-
 
 	QJsonDocument jsonDoc(jsonObject);
 	QByteArray jsonData = jsonDoc.toJson(QJsonDocument::Indented);
@@ -739,7 +785,6 @@ ApplyChanges FilterUtils::prepareChanges(const QJsonObject &root) {
 		return {};
 	}
 
-
 	const auto existingFilters = AyuDatabase::getAllRegexFilters();
 	const auto existingExclusions = AyuDatabase::getAllFiltersExclusions();
 
@@ -749,7 +794,6 @@ ApplyChanges FilterUtils::prepareChanges(const QJsonObject &root) {
 	std::vector<std::vector<char>> removeFiltersById;
 	std::vector<RegexFilterGlobalExclusion> removeExclusions;
 	std::vector<QString> peersToBeResolved;
-
 
 	if (const auto &filters = root.value("filters").toArray(); !filters.isEmpty()) {
 		for (const auto &filterRef : filters) {
@@ -771,8 +815,22 @@ ApplyChanges FilterUtils::prepareChanges(const QJsonObject &root) {
 				}
 
 				regex.reversed = filter.value("reversed").toBool();
-				regex.text = filter.value("text").toString().toStdString();
+				const auto pattern = filter.value("text").toString();
+				if (pattern.size() > kMaxFilterPatternSize) {
+					continue;
+				}
+				const auto options = regex.caseInsensitive
+					? QRegularExpression::CaseInsensitiveOption
+					: QRegularExpression::NoPatternOption;
+				if (!QRegularExpression(pattern, options).isValid()) {
+					continue;
+				}
+				regex.text = pattern.toStdString();
 
+				if (newFilters.size() + filtersOverrides.size()
+					>= kMaxImportedFilters) {
+					break;
+				}
 
 				auto it = std::ranges::find_if(existingFilters,
 											   [&regex](const RegexFilter &f)
