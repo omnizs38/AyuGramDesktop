@@ -85,9 +85,11 @@ private:
 	void sendRequest();
 	bool tryRetryWithExteraFallback();
 
-	void gotResponse();
-	void gotFailure(QNetworkReply::NetworkError e);
-	void clearSentRequest();
+	void gotResponse(QNetworkReply *reply);
+	void gotFailure(
+		QNetworkReply *reply,
+		QNetworkReply::NetworkError error);
+	void clearSentRequest(QNetworkReply *expected = nullptr);
 	bool handleResponse(const QByteArray &response);
 	bool applyResponse(const QByteArray &response);
 

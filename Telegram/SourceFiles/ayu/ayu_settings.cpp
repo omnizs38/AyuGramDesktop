@@ -21,15 +21,19 @@
 #include "rpl/combine.h"
 #include "window/window_controller.h"
 
-#include <fstream>
 #include <QApplication>
+#include <QFile>
+#include <QSaveFile>
 
 using json = nlohmann::json;
 
 namespace {
 
-std::string getSettingsPath() {
-	return (cWorkingDir() + u"tdata/ayu_settings.json"_q).toStdString();
+constexpr auto kMaxSettingsSize = 4 * 1024 * 1024;
+constexpr auto kMaxGhostAccounts = 64;
+
+QString SettingsPath() {
+	return cWorkingDir() + u"tdata/ayu_settings.json"_q;
 }
 
 void repaintApp() {
@@ -365,17 +369,37 @@ AyuSettings &AyuSettings::getInstance() {
 }
 
 void AyuSettings::load() {
-	std::ifstream file(getSettingsPath());
-	if (!file.good()) {
+	auto file = QFile(SettingsPath());
+	if (!file.exists()) {
+		return;
+	}
+	if (!file.open(QIODevice::ReadOnly)) {
+		LOG(("AyuGramSettings: failed to open settings file: %1")
+			.arg(file.errorString()));
+		return;
+	}
+	if (file.size() < 0 || file.size() > kMaxSettingsSize) {
+		LOG(("AyuGramSettings: settings file is too large: %1 bytes")
+			.arg(file.size()));
+		return;
+	}
+
+	const auto serialized = file.read(kMaxSettingsSize + 1);
+	file.close();
+	if (serialized.size() > kMaxSettingsSize) {
+		LOG(("AyuGramSettings: settings file exceeded the read limit"));
 		return;
 	}
 
 	auto &settings = getInstance();
-
 	try {
-		json p;
-		file >> p;
-		file.close();
+		auto p = json::parse(
+			serialized.constData(),
+			serialized.constData() + serialized.size());
+		if (!p.is_object()) {
+			LOG(("AyuGramSettings: settings root is not an object"));
+			return;
+		}
 
 		if (!p.contains("ghostModeSettings")) {
 			p["ghostModeSettings"] = nlohmann::json::object({
@@ -397,11 +421,17 @@ void AyuSettings::load() {
 
 		try {
 			from_json(p, settings);
+		} catch (const std::exception &error) {
+			LOG(("AyuGramSettings: failed to parse settings: %1")
+				.arg(error.what()));
 		} catch (...) {
 			LOG(("AyuGramSettings: failed to parse settings file"));
 		}
+	} catch (const std::exception &error) {
+		LOG(("AyuGramSettings: failed to read settings file: %1")
+			.arg(error.what()));
 	} catch (...) {
-		LOG(("AyuGramSettings: failed to read settings file (not json-like)"));
+		LOG(("AyuGramSettings: failed to read settings file"));
 	}
 
 	if (cGhost()) {
@@ -417,13 +447,31 @@ void AyuSettings::load() {
 }
 
 void AyuSettings::save() {
-	auto &settings = getInstance();
-	json p = settings;
-
-	std::ofstream file;
-	file.open(getSettingsPath());
-	file << p.dump(4);
-	file.close();
+	const auto serialized = QByteArray::fromStdString(
+		json(getInstance()).dump(4));
+	auto file = QSaveFile(SettingsPath());
+	file.setDirectWriteFallback(false);
+	if (!file.open(QIODevice::WriteOnly)) {
+		LOG(("AyuGramSettings: failed to open settings for writing: %1")
+			.arg(file.errorString()));
+		return;
+	}
+	if (file.write(serialized) != serialized.size()) {
+		LOG(("AyuGramSettings: failed to write settings: %1")
+			.arg(file.errorString()));
+		file.cancelWriting();
+		return;
+	}
+	if (!file.commit()) {
+		LOG(("AyuGramSettings: failed to commit settings: %1")
+			.arg(file.errorString()));
+		return;
+	}
+	if (!QFile::setPermissions(
+			SettingsPath(),
+			QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+		LOG(("AyuGramSettings: failed to restrict settings permissions"));
+	}
 }
 
 void AyuSettings::reset() {
@@ -1174,10 +1222,25 @@ void from_json(const nlohmann::json &j, AyuSettings &s) {
 
 	if (j.contains("ghostModeSettings") && j["ghostModeSettings"].is_object()) {
 		s._ghostAccounts.clear();
-		for (auto &[key, value] : j["ghostModeSettings"].items()) {
+		for (const auto &[key, value] : j["ghostModeSettings"].items()) {
+			if (s._ghostAccounts.size() >= kMaxGhostAccounts) {
+				LOG(("AyuGramSettings: too many ghost mode accounts"));
+				break;
+			}
+			auto validId = false;
+			const auto userId = QString::fromStdString(key).toULongLong(&validId);
+			if (!validId) {
+				LOG(("AyuGramSettings: ignored invalid ghost account id"));
+				continue;
+			}
 			auto account = std::make_unique<GhostModeAccountSettings>();
-			value.get_to(*account);
-			s._ghostAccounts[std::stoull(key)] = std::move(account);
+			try {
+				value.get_to(*account);
+			} catch (...) {
+				LOG(("AyuGramSettings: ignored invalid ghost account settings"));
+				continue;
+			}
+			s._ghostAccounts[userId] = std::move(account);
 		}
 	}
 

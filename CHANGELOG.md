@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Protect Ayu settings with atomic writes, strict size limits, safe per-account
+  parsing and owner-only file permissions.
+- Check the Ayu message database at startup, wait out short lock contention and
+  preserve a backup before automatic recovery.
+- Restrict filter imports to bounded HTTPS responses, validate redirects and
+  regular expressions, and trust only dpaste links returned by the publisher.
+- Bound downloaded language and remote-configuration data, apply configuration
+  atomically and retry the primary service on every refresh cycle.
+- Isolate translation cache entries by provider and message content, validate
+  language codes and reject incomplete provider responses.
 - Warm the build caches from the default branch three times a week, so a
   renamed release branch no longer starts from nothing.
 - Drive `Release` and `Cache warm` through one set of composite actions, and
